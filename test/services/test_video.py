@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from moviepy import (
@@ -1043,6 +1044,101 @@ class TestMaterialResolutionTolerance(unittest.TestCase):
 
     def test_rejects_genuinely_low_resolution_material(self):
         self.assertFalse(vd.is_material_resolution_acceptable(320, 240))
+
+
+class TestConcatVideoClipsWithXfade(unittest.TestCase):
+    def test_delegates_to_plain_concat_when_fewer_than_two_clips(self):
+        with patch.object(vd, "concat_video_clips_with_ffmpeg") as plain_concat_mock:
+            vd.concat_video_clips_with_xfade(
+                clip_files=["only.mp4"],
+                clip_durations=[5.0],
+                output_file="/tmp/out.mp4",
+                threads=2,
+                output_dir="/tmp",
+                transition_style="fade",
+            )
+        plain_concat_mock.assert_called_once_with(
+            clip_files=["only.mp4"],
+            output_file="/tmp/out.mp4",
+            threads=2,
+            output_dir="/tmp",
+            max_duration=None,
+        )
+
+    def test_builds_and_runs_ffmpeg_command_with_filter_complex(self):
+        fake_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(vd, "_get_effective_video_codec", return_value="libx264"),
+            patch.object(vd.subprocess, "run", return_value=fake_result) as run_mock,
+        ):
+            vd.concat_video_clips_with_xfade(
+                clip_files=["a.mp4", "b.mp4"],
+                clip_durations=[5.0, 4.0],
+                output_file="/tmp/out.mp4",
+                threads=2,
+                output_dir="/tmp",
+                transition_style="wipeleft",
+                max_duration=8.0,
+            )
+
+        command = run_mock.call_args.args[0]
+        self.assertIn("-filter_complex", command)
+        filter_index = command.index("-filter_complex")
+        self.assertIn("xfade=transition=wipeleft", command[filter_index + 1])
+        self.assertIn("-map", command)
+        self.assertIn("[outv]", command)
+        self.assertIn("-t", command)
+        self.assertIn("8.000", command)
+        self.assertEqual(command[-1], "/tmp/out.mp4")
+
+    def test_random_style_resolves_a_different_name_per_cut(self):
+        fake_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        chosen_names = iter(["fade", "dissolve"])
+        with (
+            patch.object(vd, "_get_effective_video_codec", return_value="libx264"),
+            patch.object(vd.subprocess, "run", return_value=fake_result) as run_mock,
+        ):
+            vd.concat_video_clips_with_xfade(
+                clip_files=["a.mp4", "b.mp4", "c.mp4"],
+                clip_durations=[5.0, 5.0, 5.0],
+                output_file="/tmp/out.mp4",
+                threads=2,
+                output_dir="/tmp",
+                transition_style="random",
+                random_choice=lambda seq: next(chosen_names),
+            )
+
+        command = run_mock.call_args.args[0]
+        filter_index = command.index("-filter_complex")
+        self.assertIn("transition=fade", command[filter_index + 1])
+        self.assertIn("transition=dissolve", command[filter_index + 1])
+
+    def test_falls_back_to_default_codec_on_failure(self):
+        failing_result = SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        ok_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(vd, "_get_effective_video_codec", return_value="h264_nvenc"),
+            patch.object(vd, "_DEFAULT_VIDEO_CODEC", "libx264"),
+            patch.object(vd, "_disable_runtime_video_codec") as disable_mock,
+            patch.object(
+                vd.subprocess, "run", side_effect=[failing_result, ok_result]
+            ) as run_mock,
+        ):
+            vd.concat_video_clips_with_xfade(
+                clip_files=["a.mp4", "b.mp4"],
+                clip_durations=[5.0, 5.0],
+                output_file="/tmp/out.mp4",
+                threads=2,
+                output_dir="/tmp",
+                transition_style="fade",
+            )
+
+        self.assertEqual(run_mock.call_count, 2)
+        first_codec_index = run_mock.call_args_list[0].args[0].index("-c:v") + 1
+        second_codec_index = run_mock.call_args_list[1].args[0].index("-c:v") + 1
+        self.assertEqual(run_mock.call_args_list[0].args[0][first_codec_index], "h264_nvenc")
+        self.assertEqual(run_mock.call_args_list[1].args[0][second_codec_index], "libx264")
+        disable_mock.assert_called_once()
 
 
 if __name__ == "__main__":

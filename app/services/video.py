@@ -36,6 +36,7 @@ from app.models.schema import (
 )
 from app.services import bgm as bgm_service
 from app.services.utils import video_effects
+from app.services.utils import xfade_transitions
 from app.utils import file_security, utils
 
 class SubClippedVideoClip:
@@ -390,6 +391,78 @@ def concat_video_clips_with_ffmpeg(
             return result_codec
     finally:
         delete_files(concat_list_file)
+
+
+def concat_video_clips_with_xfade(
+    clip_files: List[str],
+    clip_durations: List[float],
+    output_file: str,
+    threads: int,
+    output_dir: str,
+    transition_style: str,
+    transition_duration: float = 1.0,
+    max_duration: float | None = None,
+    random_choice=random.choice,
+) -> None:
+    if len(clip_files) < 2:
+        # Nothing to transition between -- fall back to plain concat.
+        concat_video_clips_with_ffmpeg(
+            clip_files=clip_files,
+            output_file=output_file,
+            threads=threads,
+            output_dir=output_dir,
+            max_duration=max_duration,
+        )
+        return
+
+    transition_durations = xfade_transitions.compute_transition_durations(
+        clip_durations, transition_duration
+    )
+    transition_names = [
+        xfade_transitions.resolve_transition_name(transition_style, random_choice=random_choice)
+        for _ in transition_durations
+    ]
+    filter_complex, output_label = xfade_transitions.build_xfade_filter_complex(
+        clip_durations, transition_names, transition_durations
+    )
+
+    def build_command(codec: str) -> list[str]:
+        command = [utils.get_ffmpeg_binary(), "-y"]
+        for clip_file in clip_files:
+            command += ["-i", clip_file]
+        command += [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            output_label,
+            "-c:v",
+            codec,
+            "-threads",
+            str(threads or 2),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if max_duration is not None and max_duration > 0:
+            command += ["-t", f"{max_duration:.3f}"]
+        command.append(output_file)
+        return command
+
+    def run_xfade(codec: str) -> str:
+        command = build_command(codec)
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            error_message = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(error_message or "ffmpeg xfade concat failed")
+        return codec
+
+    effective_codec = _get_effective_video_codec()
+    try:
+        run_xfade(effective_codec)
+    except Exception as exc:
+        if effective_codec == _DEFAULT_VIDEO_CODEC:
+            raise
+        run_xfade(_DEFAULT_VIDEO_CODEC)
+        _disable_runtime_video_codec(effective_codec, str(exc))
 
 
 def _sanitize_image_file(image_path: str) -> str:
