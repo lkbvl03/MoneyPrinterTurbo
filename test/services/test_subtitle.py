@@ -81,6 +81,72 @@ class TestSubtitleService(unittest.TestCase):
 
         self.assertEqual([item[2] for item in items], ["Hello world", "Again"])
 
+    def test_create_without_max_line_length_matches_current_behavior(self):
+        """max_line_length 未设置时行为必须与今天完全一致（回归保护）。"""
+
+        class _FakeWhisperModel:
+            def __init__(self, **kwargs):
+                self.init_kwargs = kwargs
+
+            def transcribe(self, audio_file, **kwargs):
+                words = [
+                    SimpleNamespace(start=0.0, end=0.4, word="Hello"),
+                    SimpleNamespace(start=0.4, end=0.9, word=" world."),
+                    SimpleNamespace(start=1.0, end=1.5, word="Again"),
+                ]
+                segment = SimpleNamespace(start=0.0, end=1.8, words=words)
+                info = SimpleNamespace(language="en", language_probability=0.99)
+                return [segment], info
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "generated.srt"
+            with patch.object(subtitle, "model", None), patch.object(
+                subtitle, "WhisperModel", _FakeWhisperModel,
+            ):
+                subtitle.create("audio.mp3", str(subtitle_file))
+
+            items = subtitle.file_to_subtitles(str(subtitle_file))
+
+        self.assertEqual([item[2] for item in items], ["Hello world", "Again"])
+
+    def test_create_with_max_line_length_forces_early_break_without_punctuation(self):
+        """
+        max_line_length 设置时，即使没有标点，累计文本达到上限也应提前断句，
+        且断句必须发生在加入会超限的那个词之前，保证每条字幕不超过上限。
+        """
+
+        class _FakeWhisperModel:
+            def __init__(self, **kwargs):
+                self.init_kwargs = kwargs
+
+            def transcribe(self, audio_file, **kwargs):
+                words = [
+                    SimpleNamespace(start=0.0, end=0.3, word="This"),
+                    SimpleNamespace(start=0.3, end=0.6, word=" is"),
+                    SimpleNamespace(start=0.6, end=0.9, word=" a"),
+                    SimpleNamespace(start=0.9, end=1.2, word=" very"),
+                    SimpleNamespace(start=1.2, end=1.5, word=" long"),
+                    SimpleNamespace(start=1.5, end=1.8, word=" sentence"),
+                    SimpleNamespace(start=1.8, end=2.1, word=" without"),
+                    SimpleNamespace(start=2.1, end=2.4, word=" punctuation"),
+                ]
+                segment = SimpleNamespace(start=0.0, end=2.4, words=words)
+                info = SimpleNamespace(language="en", language_probability=0.99)
+                return [segment], info
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "generated.srt"
+            with patch.object(subtitle, "model", None), patch.object(
+                subtitle, "WhisperModel", _FakeWhisperModel,
+            ):
+                subtitle.create("audio.mp3", str(subtitle_file), max_line_length=15)
+
+            items = subtitle.file_to_subtitles(str(subtitle_file))
+
+        self.assertGreater(len(items), 1)
+        for item in items:
+            self.assertLessEqual(len(item[2]), 15)
+
     def test_correct_ignores_markdown_separator_lines(self):
         """
         Whisper fallback 校正阶段也必须忽略 `---` 这类不可发声脚本行。

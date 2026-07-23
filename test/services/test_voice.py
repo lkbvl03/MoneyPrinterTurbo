@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.utils import utils
 from app.services import voice as vs
+from app.services import subtitle as subtitle_service
 from app.services import task as task_service
 from pydub import AudioSegment
 
@@ -732,7 +733,7 @@ class TestVoiceService(unittest.TestCase):
             Path(tmp_dir, task_id).mkdir(parents=True, exist_ok=True)
             subtitle_path = task_service.generate_subtitle(
                 task_id=task_id,
-                params=type("Params", (), {"subtitle_enabled": True})(),
+                params=type("Params", (), {"subtitle_enabled": True, "video_aspect": "16:9"})(),
                 video_script=script,
                 sub_maker=sub_maker,
                 audio_file="",
@@ -860,6 +861,68 @@ class TestVoiceService(unittest.TestCase):
         self.assertIn("أهلاً وسهلاً بك في المدرسة", sub_items[0])
         self.assertIn("شكراً لك", sub_items[-1])
 
+    def test_create_subtitle_without_max_line_length_matches_current_behavior(self):
+        """
+        max_line_length 未设置时行为必须与今天完全一致：按标点断句，不按字符数拆分。
+        """
+        text = "This is a very long sentence that must be wrapped into pieces."
+        words = text.rstrip(".").split(" ")
+        sub_maker = SimpleNamespace(
+            cues=[
+                SimpleNamespace(
+                    content=word + " ",
+                    start=timedelta(seconds=index),
+                    end=timedelta(seconds=index + 0.8),
+                )
+                for index, word in enumerate(words)
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "subtitle.srt"
+            vs.create_subtitle(
+                sub_maker=sub_maker,
+                text=text,
+                subtitle_file=str(subtitle_file),
+            )
+            subtitle_content = subtitle_file.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "This is a very long sentence that must be wrapped into pieces",
+            subtitle_content,
+        )
+
+    def test_create_subtitle_with_max_line_length_wraps_long_lines(self):
+        """
+        max_line_length 设置时，超长句子应在单词边界拆成多条字幕，每条不超过上限。
+        """
+        text = "This is a very long sentence that must be wrapped into pieces."
+        words = text.rstrip(".").split(" ")
+        sub_maker = SimpleNamespace(
+            cues=[
+                SimpleNamespace(
+                    content=word + " ",
+                    start=timedelta(seconds=index),
+                    end=timedelta(seconds=index + 0.8),
+                )
+                for index, word in enumerate(words)
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "subtitle.srt"
+            vs.create_subtitle(
+                sub_maker=sub_maker,
+                text=text,
+                subtitle_file=str(subtitle_file),
+                max_line_length=20,
+            )
+            subtitle_items = subtitle_service.file_to_subtitles(str(subtitle_file))
+
+        self.assertGreater(len(subtitle_items), 1)
+        for _index, _times, sub_text in subtitle_items:
+            self.assertLessEqual(len(sub_text), 20)
+
     def test_create_subtitle_ignores_markdown_separator_lines(self):
         """
         用户手动脚本可能包含 `---` 这类 Markdown 分隔符。TTS 不会朗读
@@ -944,6 +1007,32 @@ class TestVoiceService(unittest.TestCase):
         self.assertEqual(vs.convert_rate_to_percent(0.0), "+0%")
         self.assertEqual(vs.convert_rate_to_percent(None), "+0%")
         self.assertEqual(vs.convert_rate_to_percent(""), "+0%")
+
+
+def test_split_string_by_punctuations_and_length_keeps_short_sentences_whole():
+    from app.utils import utils
+
+    result = utils.split_string_by_punctuations_and_length("Hello world.", 50)
+    assert result == ["Hello world"]
+
+
+def test_split_string_by_punctuations_and_length_wraps_long_sentences_at_word_boundaries():
+    from app.utils import utils
+
+    text = "This sentence is intentionally long enough that it must be wrapped into multiple pieces."
+    result = utils.split_string_by_punctuations_and_length(text, 30)
+
+    assert all(len(line) <= 30 for line in result)
+    # Rejoining with single spaces must reproduce the original words in order,
+    # proving no word was split or dropped.
+    assert " ".join(result) == "This sentence is intentionally long enough that it must be wrapped into multiple pieces"
+
+
+def test_split_string_by_punctuations_and_length_never_splits_a_single_long_word():
+    from app.utils import utils
+
+    result = utils.split_string_by_punctuations_and_length("Supercalifragilisticexpialidocious.", 10)
+    assert result == ["Supercalifragilisticexpialidocious"]
 
 
 class TestElevenLabsVoice(unittest.TestCase):

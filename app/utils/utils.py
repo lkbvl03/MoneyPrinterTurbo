@@ -263,6 +263,35 @@ def split_string_by_punctuations(s):
     return result
 
 
+def split_string_by_punctuations_and_length(s, max_length):
+    """
+    在 split_string_by_punctuations 的标点断句结果基础上，对每一段超过
+    max_length 字符的文本，在单词边界继续拆分成更短的片段。
+
+    用于短视频（9:16/1:1）字幕：避免一屏字幕过长。严格按空格切词，不会
+    在单词内部断开，因此每个子片段仍然是原文的精确子串，可以被 TTS cue
+    逐词累加匹配（_match_script_line）。
+    """
+    result = []
+    for sentence in split_string_by_punctuations(s):
+        if len(sentence) <= max_length:
+            result.append(sentence)
+            continue
+
+        words = sentence.split(" ")
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip() if current else word
+            if len(candidate) > max_length and current:
+                result.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            result.append(current)
+    return result
+
+
 def normalize_script_for_subtitle_matching(video_script: str) -> str:
     """
     清理字幕匹配前的脚本文本。

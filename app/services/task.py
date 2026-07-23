@@ -13,7 +13,7 @@ from loguru import logger
 
 from app.config import config
 from app.models import const
-from app.models.schema import VideoConcatMode, VideoParams
+from app.models.schema import VideoAspect, VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
     elevenlabs_music,
@@ -29,6 +29,11 @@ from app.services import upload_post
 from app.services import state as sm
 from app.utils import file_security, utils
 
+
+# Character cap for a single subtitle line on short-form (9:16 / 1:1) videos.
+# Long-form (16:9) videos keep today's punctuation-only splitting, unchanged.
+_SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH = 50
+_SHORT_FORM_VIDEO_ASPECTS = (VideoAspect.portrait.value, VideoAspect.square.value)
 
 # 发布请求最长可等待数分钟，不能继续占用视频生成任务的并发名额。
 # 固定大小的线程池将发布吞吐限制在可控范围内，同时让视频产物生成后
@@ -527,19 +532,29 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         logger.info("subtitle provider is empty, skip subtitle generation")
         return ""
 
+    max_line_length = (
+        _SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH
+        if params.video_aspect in _SHORT_FORM_VIDEO_ASPECTS
+        else None
+    )
+
     if sub_maker is None and subtitle_provider != "whisper":
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
-        # sub_maker 时间轴。只有 Whisper 可以直接从音频文件转写字幕；
-        # 其他字幕提供方继续保持原有行为，避免生成错误的空时间轴。
-        logger.warning(
-            "subtitle maker is missing, skip subtitle generation for provider: "
-            f"{subtitle_provider}"
+        # sub_maker 时间轴，Edge 字幕流程完全无法工作。Whisper 可以直接从
+        # 音频文件转写，因此这里自动切换到 Whisper，而不是静默跳过字幕
+        # （用户明确同意接受首次下载模型和 CPU 转写变慢的代价）。
+        logger.info(
+            "no TTS timing data available (custom/uploaded audio in use); "
+            "falling back to Whisper to transcribe subtitles directly from audio"
         )
-        return ""
+        subtitle_provider = "whisper"
 
     if subtitle_provider == "edge":
         voice.create_subtitle(
-            text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
+            text=video_script,
+            sub_maker=sub_maker,
+            subtitle_file=subtitle_path,
+            max_line_length=max_line_length,
         )
         if not os.path.exists(subtitle_path):
             # Edge 字幕偶尔会因为时间轴与文案无法匹配而没有产出文件。这里不能
@@ -553,7 +568,11 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
             return ""
 
     if subtitle_provider == "whisper":
-        subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
+        subtitle.create(
+            audio_file=audio_file,
+            subtitle_file=subtitle_path,
+            max_line_length=max_line_length,
+        )
         logger.info("\n\n## correcting subtitle")
         subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
 

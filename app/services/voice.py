@@ -12,7 +12,7 @@ import threading
 import time
 import unicodedata
 from datetime import datetime
-from typing import Union
+from typing import Optional, Union
 from xml.sax.saxutils import escape, unescape
 
 import edge_tts
@@ -1674,15 +1674,25 @@ def _build_subtitle_items_from_legacy_submaker(
     return sub_items
 
 
-def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
+def create_subtitle(
+    sub_maker: SubMaker,
+    text: str,
+    subtitle_file: str,
+    max_line_length: Optional[int] = None,
+):
     """
     优化字幕文件
-    1. 将字幕文件按照标点符号分割成多行
+    1. 将字幕文件按照标点符号分割成多行（或在 max_line_length 设置时，
+       进一步按字符数拆分为更短的片段）
     2. 逐行匹配字幕文件中的文本
     3. 生成新的字幕文件
     """
     text = _format_text(text)
-    script_lines = utils.split_string_by_punctuations(text)
+    script_lines = (
+        utils.split_string_by_punctuations_and_length(text, max_line_length)
+        if max_line_length
+        else utils.split_string_by_punctuations(text)
+    )
     try:
         if hasattr(sub_maker, "cues") and sub_maker.cues:
             sub_items = _build_subtitle_items_from_edge_cues(sub_maker, script_lines)

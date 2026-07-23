@@ -609,7 +609,7 @@ class TestTaskService(unittest.TestCase):
             subtitle_enabled=True,
         )
 
-        def fake_whisper_create(audio_file, subtitle_file):
+        def fake_whisper_create(audio_file, subtitle_file, max_line_length=None):
             Path(subtitle_file).write_text(
                 "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n",
                 encoding="utf-8",
@@ -638,15 +638,17 @@ class TestTaskService(unittest.TestCase):
             shutil.rmtree(task_dir, ignore_errors=True)
 
         self.assertTrue(subtitle_path.endswith("subtitle.srt"))
-        create.assert_called_once_with(audio_file=audio_file, subtitle_file=subtitle_path)
+        create.assert_called_once_with(
+            audio_file=audio_file, subtitle_file=subtitle_path, max_line_length=50
+        )
         correct.assert_called_once_with(
             subtitle_file=subtitle_path, video_script="Hello world."
         )
 
-    def test_generate_subtitle_skips_edge_provider_without_sub_maker(self):
+    def test_generate_subtitle_falls_back_to_whisper_for_custom_audio_with_edge_provider(self):
         """
-        Edge 字幕依赖 TTS 返回的 sub_maker 时间轴。
-        自定义音频缺少该对象时应继续跳过，避免产生不可信的字幕时间轴。
+        自定义音频没有 TTS 生成的 sub_maker 时间轴，Edge 字幕无法工作。
+        现在应自动回退到 Whisper 直接从音频文件转写，而不是静默跳过字幕。
         """
         task_id = "test-custom-audio-edge-no-submaker"
         task_dir = utils.task_dir(task_id)
@@ -658,6 +660,12 @@ class TestTaskService(unittest.TestCase):
             subtitle_enabled=True,
         )
 
+        def fake_whisper_create(audio_file, subtitle_file, **kwargs):
+            Path(subtitle_file).write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n",
+                encoding="utf-8",
+            )
+
         try:
             with (
                 patch.object(
@@ -665,8 +673,11 @@ class TestTaskService(unittest.TestCase):
                     "app",
                     dict(tm.config.app, subtitle_provider="edge"),
                 ),
+                patch.object(
+                    tm.subtitle, "create", side_effect=fake_whisper_create
+                ) as whisper_create,
+                patch.object(tm.subtitle, "correct") as whisper_correct,
                 patch.object(tm.voice, "create_subtitle") as create_subtitle,
-                patch.object(tm.subtitle, "create") as whisper_create,
             ):
                 subtitle_path = tm.generate_subtitle(
                     task_id=task_id,
@@ -678,9 +689,12 @@ class TestTaskService(unittest.TestCase):
         finally:
             shutil.rmtree(task_dir, ignore_errors=True)
 
-        self.assertEqual(subtitle_path, "")
+        self.assertTrue(subtitle_path.endswith("subtitle.srt"))
         create_subtitle.assert_not_called()
-        whisper_create.assert_not_called()
+        whisper_create.assert_called_once()
+        whisper_correct.assert_called_once_with(
+            subtitle_file=subtitle_path, video_script="Hello world."
+        )
 
     def test_generate_subtitle_does_not_fallback_to_whisper_when_edge_fails(self):
         """

@@ -2,6 +2,7 @@ import json
 import os.path
 import re
 from timeit import default_timer as timer
+from typing import Optional
 
 try:
     from faster_whisper import WhisperModel
@@ -18,7 +19,7 @@ compute_type = config.whisper.get("compute_type", "int8")
 model = None
 
 
-def create(audio_file, subtitle_file: str = ""):
+def create(audio_file, subtitle_file: str = "", max_line_length: Optional[int] = None):
     global model
     if WhisperModel is None:
         logger.warning("faster_whisper not available, skipping whisper subtitle generation")
@@ -92,6 +93,20 @@ def create(audio_file, subtitle_file: str = ""):
                 if not is_segmented:
                     seg_start = word.start
                     is_segmented = True
+
+                # 在真正拼接这个词之前检查：如果加上它会超过字符上限，就先把
+                # 已经累积的文本作为一条独立字幕提交，再让这个词开启新的一段。
+                # 必须在拼接前判断（而不是拼接后再检查），否则每条字幕会被
+                # 多拼进一个词，超出 max_line_length 上限。
+                would_exceed_length = (
+                    max_line_length is not None
+                    and seg_text.strip()
+                    and len((seg_text + word.word).strip()) > max_line_length
+                )
+                if would_exceed_length:
+                    recognized(seg_text.strip(), seg_start, seg_end)
+                    seg_text = ""
+                    seg_start = word.start
 
                 seg_end = word.end
                 # If it contains punctuation, then break the sentence.
