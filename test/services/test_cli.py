@@ -594,6 +594,47 @@ class TestCli(unittest.TestCase):
         self.assertIn("Generate MoneyPrinterTurbo videos", result.stdout)
         self.assertEqual(result.stderr, "")
 
+    def test_video_transition_style_accepts_a_valid_name(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "测试主题",
+                "--video-transition-style",
+                "wipeleft",
+            ]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.video_transition_style, "wipeleft")
+
+    def test_video_transition_style_accepts_random(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "测试主题",
+                "--video-transition-style",
+                "random",
+            ]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.video_transition_style, "random")
+
+    def test_video_transition_style_defaults_to_none(self):
+        args = cli.parse_args(["--video-subject", "测试主题"])
+        params = cli.build_video_params(args)
+        self.assertIsNone(params.video_transition_style)
+
+    def test_video_transition_style_rejects_unknown_name(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args(
+                [
+                    "--video-subject",
+                    "测试主题",
+                    "--video-transition-style",
+                    "not-a-real-transition",
+                ]
+            )
+        self.assertEqual(cm.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

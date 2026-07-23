@@ -111,6 +111,32 @@ class TestTaskService(unittest.TestCase):
 
         self.assertEqual(combine_videos.call_args.kwargs["clip_speed"], 1.25)
 
+    def test_generate_final_videos_forwards_transition_style(self):
+        """任务编排层必须把用户选择的 xfade 转场风格传给视频合成服务。"""
+        params = VideoParams(
+            video_subject="test",
+            video_count=1,
+            video_transition_style="wipeleft",
+        )
+
+        with (
+            patch.object(tm.video, "combine_videos") as combine_videos,
+            patch.object(tm.video, "generate_video"),
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            tm.generate_final_videos(
+                task_id="transition-style-task",
+                params=params,
+                downloaded_videos=["material.mp4"],
+                audio_file="audio.mp3",
+                subtitle_path="",
+                audio_duration=5,
+            )
+
+        self.assertEqual(
+            combine_videos.call_args.kwargs["video_transition_style"], "wipeleft"
+        )
+
     def test_generate_final_videos_uses_generated_sonilo_music(self):
         """Sonilo 必须针对每条拼接后的视频生成配乐，并传给最终混音。"""
         params = VideoParams(

@@ -115,6 +115,22 @@ def _transition_mode(value: str) -> str | None:
     return _TRANSITION_MODE_VALUES[normalized]
 
 
+def _transition_style(value: str) -> str:
+    # cli.py 刻意避免在模块顶层导入 app.* 模块，以保证 ``cli.py -h`` 输出
+    # 迅速且不产生配置初始化日志；这里沿用 build_video_params 的延迟导入
+    # 方式，只在真正解析到该参数时才导入转场目录。
+    from app.services.utils.xfade_transitions import XFADE_TRANSITIONS
+
+    normalized = value.strip()
+    choices = ("random", *XFADE_TRANSITIONS)
+    if normalized not in choices:
+        allowed = ", ".join(choices)
+        raise argparse.ArgumentTypeError(
+            f"video-transition-style must be one of: {allowed}"
+        )
+    return normalized
+
+
 def _bgm_type(value: str) -> str:
     normalized = value.strip().lower()
     if normalized == "none":
@@ -257,6 +273,16 @@ Output and exit status:
         default=None,
         metavar="{none,shuffle,fade-in,fade-out,slide-in,slide-out}",
         help="transition applied between source clips (default: none)",
+    )
+    video_group.add_argument(
+        "--video-transition-style",
+        type=_transition_style,
+        default=None,
+        metavar="{random,<48 ffmpeg xfade names>}",
+        help=(
+            "professional ffmpeg xfade transition between source clips, "
+            "independent of --video-transition-mode (default: none)"
+        ),
     )
     video_group.add_argument(
         "--video-clip-duration",
@@ -537,6 +563,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "custom_system_prompt",
         "video_concat_mode",
         "video_transition_mode",
+        "video_transition_style",
         "video_clip_duration",
         "match_materials_to_script",
         "n_threads",
