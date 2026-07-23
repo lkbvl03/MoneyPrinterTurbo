@@ -78,6 +78,7 @@ class VideoParams(BaseModel):
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
+    video_transition_style: Optional[str] = None
     video_clip_duration: Optional[int] = 5
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False

@@ -1141,5 +1141,104 @@ class TestConcatVideoClipsWithXfade(unittest.TestCase):
         disable_mock.assert_called_once()
 
 
+class TestCombineVideosXfadeIntegration(unittest.TestCase):
+    def test_default_none_style_calls_plain_concat_unchanged(self):
+        """video_transition_style=None must be fully backward compatible."""
+
+        class _FakeAudioClip:
+            duration = 5.0
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            with (
+                patch.object(vd, "AudioFileClip", return_value=_FakeAudioClip()),
+                patch.object(vd, "concat_video_clips_with_ffmpeg") as plain_concat_mock,
+                patch.object(vd, "concat_video_clips_with_xfade") as xfade_concat_mock,
+            ):
+                vd.combine_videos(
+                    combined_video_path=combined_video_path,
+                    video_paths=[],
+                    audio_file="audio.mp3",
+                    video_transition_style=None,
+                )
+
+        xfade_concat_mock.assert_not_called()
+        # No clips were provided, so plain concat still runs (matches existing
+        # no-clips behavior) -- this assertion only confirms the xfade path was
+        # never selected, not the exact plain-concat call shape.
+        self.assertFalse(xfade_concat_mock.called)
+
+    def test_style_set_skips_legacy_effects_and_calls_xfade_concat(self):
+        class _FakeAudioClip:
+            # Kept short enough (plus the 0.1s safety margin) to stay within a
+            # single 3s max_clip_duration clip, so the pre-existing "loop clips
+            # to fill audio duration" padding in combine_videos does not kick
+            # in and duplicate processed clips without re-writing them to disk.
+            duration = 2.5
+
+            def close(self):
+                pass
+
+        class _FakeVideoClip:
+            def __init__(self, duration=3.0):
+                self.duration = duration
+                self.size = (1080, 1920)
+                self.w = 1080
+                self.h = 1920
+
+            def subclipped(self, start_time, end_time):
+                return _FakeVideoClip(end_time - start_time)
+
+            def with_speed_scaled(self, factor):
+                return self
+
+            def close(self):
+                pass
+
+        written_durations = []
+
+        def _capture_written_clip(clip, *_args, **_kwargs):
+            written_durations.append(clip.duration)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            with (
+                patch.object(vd, "AudioFileClip", return_value=_FakeAudioClip()),
+                patch.object(
+                    vd, "_open_video_clip_quietly", return_value=_FakeVideoClip(3.0)
+                ),
+                patch.object(
+                    vd,
+                    "_write_videofile_with_codec_fallback",
+                    side_effect=_capture_written_clip,
+                ),
+                patch.object(
+                    vd,
+                    "_prioritize_unique_source_clips",
+                    side_effect=lambda subclipped_items, concat_mode: subclipped_items,
+                ),
+                patch.object(vd, "concat_video_clips_with_xfade") as xfade_concat_mock,
+                patch.object(vd, "concat_video_clips_with_ffmpeg") as plain_concat_mock,
+                patch.object(vd, "delete_files"),
+            ):
+                vd.combine_videos(
+                    combined_video_path=combined_video_path,
+                    video_paths=["a.mp4"],
+                    audio_file="audio.mp3",
+                    video_concat_mode=vd.VideoConcatMode.sequential,
+                    max_clip_duration=3,
+                    video_transition_style="wipeleft",
+                )
+
+        plain_concat_mock.assert_not_called()
+        xfade_concat_mock.assert_called_once()
+        call_kwargs = xfade_concat_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["transition_style"], "wipeleft")
+        self.assertEqual(call_kwargs["clip_durations"], written_durations)
+
+
 if __name__ == "__main__":
     unittest.main()
