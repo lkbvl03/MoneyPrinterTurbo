@@ -813,7 +813,40 @@ def combine_videos(
             f"required duration: {required_video_duration:.2f}s, "
             f"looped {len(processed_clips)-len(base_clips)} clips"
         )
-     
+
+    # xfade blends each pair of adjacent clips over their transition duration, so the
+    # actual combined output duration is sum(clip_durations) - sum(transition_durations),
+    # not the raw sum the loop above targets. Without this second pass, the final mux
+    # (audio applied onto the video's own duration) silently truncates the narration by
+    # however many seconds the transitions consumed.
+    if video_transition_style and processed_clips:
+        transition_durations = xfade_transitions.compute_transition_durations(
+            [clip.duration for clip in processed_clips], 1.0
+        )
+        effective_duration = sum(
+            clip.duration for clip in processed_clips
+        ) - sum(transition_durations)
+        if effective_duration < required_video_duration:
+            logger.warning(
+                f"xfade-combined duration ({effective_duration:.2f}s) is shorter than "
+                f"required duration ({required_video_duration:.2f}s) after accounting for "
+                "transition overlap, looping clips to compensate."
+            )
+            base_clips = processed_clips.copy()
+            for clip in itertools.cycle(base_clips):
+                if effective_duration >= required_video_duration:
+                    break
+                processed_clips.append(clip)
+                durations = [clip.duration for clip in processed_clips]
+                transition_durations = xfade_transitions.compute_transition_durations(
+                    durations, 1.0
+                )
+                effective_duration = sum(durations) - sum(transition_durations)
+            logger.info(
+                f"xfade-combined duration: {effective_duration:.2f}s, "
+                f"audio duration: {audio_duration:.2f}s"
+            )
+
     # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
     logger.info("starting clip merging process")
     if not processed_clips:

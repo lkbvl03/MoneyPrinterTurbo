@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from app.config import config
 from app.models.schema import MaterialInfo
 from app.services import video as vd
+from app.services.utils import xfade_transitions
 from app.utils import utils
 
 resources_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources")
@@ -1238,6 +1239,87 @@ class TestCombineVideosXfadeIntegration(unittest.TestCase):
         call_kwargs = xfade_concat_mock.call_args.kwargs
         self.assertEqual(call_kwargs["transition_style"], "wipeleft")
         self.assertEqual(call_kwargs["clip_durations"], written_durations)
+
+    def test_xfade_padding_accounts_for_transition_overlap(self):
+        """The raw-sum loop is not enough once xfade transitions eat into the
+        combined duration: with several clips and a large audio duration, the
+        clips fed to concat_video_clips_with_xfade must cover the required
+        duration even AFTER subtracting the overlap consumed by transitions."""
+
+        class _FakeAudioClip:
+            # Large enough that, with 5 source clips of 3.0s each, the OLD
+            # raw-sum loop (sum(durations) >= required_duration) would stop
+            # after all 5 clips even though 4 transitions of up to 1.0s each
+            # eat into the effective combined duration.
+            duration = 14.5
+
+            def close(self):
+                pass
+
+        class _FakeVideoClip:
+            def __init__(self, duration=3.0):
+                self.duration = duration
+                self.size = (1080, 1920)
+                self.w = 1080
+                self.h = 1920
+
+            def subclipped(self, start_time, end_time):
+                return _FakeVideoClip(end_time - start_time)
+
+            def with_speed_scaled(self, factor):
+                return self
+
+            def close(self):
+                pass
+
+        written_durations = []
+
+        def _capture_written_clip(clip, *_args, **_kwargs):
+            written_durations.append(clip.duration)
+
+        video_paths = [f"clip-{i}.mp4" for i in range(5)]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            with (
+                patch.object(vd, "AudioFileClip", return_value=_FakeAudioClip()),
+                patch.object(
+                    vd, "_open_video_clip_quietly", return_value=_FakeVideoClip(3.0)
+                ),
+                patch.object(
+                    vd,
+                    "_write_videofile_with_codec_fallback",
+                    side_effect=_capture_written_clip,
+                ),
+                patch.object(
+                    vd,
+                    "_prioritize_unique_source_clips",
+                    side_effect=lambda subclipped_items, concat_mode: subclipped_items,
+                ),
+                patch.object(vd, "concat_video_clips_with_xfade") as xfade_concat_mock,
+                patch.object(vd, "concat_video_clips_with_ffmpeg"),
+                patch.object(vd, "delete_files"),
+            ):
+                vd.combine_videos(
+                    combined_video_path=combined_video_path,
+                    video_paths=video_paths,
+                    audio_file="audio.mp3",
+                    video_concat_mode=vd.VideoConcatMode.sequential,
+                    max_clip_duration=3,
+                    video_transition_style="wipeleft",
+                )
+
+        xfade_concat_mock.assert_called_once()
+        call_kwargs = xfade_concat_mock.call_args.kwargs
+        durations = call_kwargs["clip_durations"]
+        required_video_duration = vd._get_required_video_duration(
+            _FakeAudioClip.duration
+        )
+        transition_durations = xfade_transitions.compute_transition_durations(
+            durations, 1.0
+        )
+        effective_duration = sum(durations) - sum(transition_durations)
+        self.assertGreaterEqual(effective_duration, required_video_duration)
 
 
 if __name__ == "__main__":

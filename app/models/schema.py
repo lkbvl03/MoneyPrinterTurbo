@@ -3,9 +3,10 @@ from enum import Enum
 from typing import Any, List, Literal, Optional, Union
 
 import pydantic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config import config
+from app.services.utils.xfade_transitions import XFADE_TRANSITIONS
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -118,6 +119,21 @@ class VideoParams(BaseModel):
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
+
+    @field_validator("video_transition_style")
+    @classmethod
+    def _validate_video_transition_style(cls, value: Optional[str]) -> Optional[str]:
+        # cli.py 的 _transition_style 只保护 CLI 入口；HTTP API 直接从请求 JSON
+        # 构造 VideoParams，绕过了那层检查，未校验的字符串会被拼进 ffmpeg
+        # filter_complex 字符串。这里在 schema 层强制约束合法取值。
+        if value is None or value == "random":
+            return value
+        if value not in XFADE_TRANSITIONS:
+            allowed = ", ".join(("random", *XFADE_TRANSITIONS))
+            raise ValueError(
+                f"video_transition_style must be one of: {allowed}"
+            )
+        return value
 
 
 class SubtitleRequest(BaseModel):
