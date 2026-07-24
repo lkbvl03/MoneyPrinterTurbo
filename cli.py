@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from typing import TYPE_CHECKING, Sequence
 from uuid import UUID, uuid4
 
@@ -13,6 +14,19 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from app.models.schema import MaterialInfo, VideoParams
+
+
+# Khi bị gọi qua subprocess (vd. ContentStudio), stdout/stderr trên Windows mặc
+# định dùng codepage hệ thống (thường là cp1252) thay vì UTF-8. Log tiếng Việt
+# hoặc icon của loguru chứa ký tự ngoài bảng mã đó sẽ làm CLI crash với
+# UnicodeEncodeError và thoát bằng mã lỗi khác 0. Ép UTF-8 ngay từ đầu để loại
+# bỏ phụ thuộc vào codepage của tiến trình gọi.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except ValueError:
+            pass
 
 
 DEFAULT_VOICE_NAME = "zh-CN-XiaoxiaoNeural-Female"
