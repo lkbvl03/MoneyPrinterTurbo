@@ -177,6 +177,37 @@ class TestSubtitleBackgroundSettings(unittest.TestCase):
 
         self.assertEqual(resolved, "/nonexistent/dir/SomeFont.ttf")
 
+    def test_max_chars_per_line_shrinks_as_font_size_grows(self):
+        """
+        固定字符数上限没法适应所有字号：字号越大，同样字符数占的像素越宽。
+        这里验证按实际像素测量得到的每行字符数上限，会随字号增大而减少。
+        """
+        fonts_dir = Path(__file__).parent.parent.parent / "resource" / "fonts"
+        font_path = str(fonts_dir / "BeVietnamPro-Bold.ttf")
+        sample = "la ban dang dung cuoc doi cua nguoi khac"
+        max_width = 972  # 1080 * 0.9, portrait short-form frame
+
+        small_font_cap = video.max_chars_per_line(font_path, 40, max_width, sample)
+        large_font_cap = video.max_chars_per_line(font_path, 90, max_width, sample)
+
+        self.assertIsNotNone(small_font_cap)
+        self.assertIsNotNone(large_font_cap)
+        self.assertLess(large_font_cap, small_font_cap)
+
+    def test_max_chars_per_line_returns_none_for_empty_sample(self):
+        fonts_dir = Path(__file__).parent.parent.parent / "resource" / "fonts"
+        font_path = str(fonts_dir / "BeVietnamPro-Bold.ttf")
+
+        self.assertIsNone(video.max_chars_per_line(font_path, 60, 972, ""))
+        self.assertIsNone(video.max_chars_per_line(font_path, 60, 972, "   "))
+
+    def test_max_chars_per_line_returns_none_when_font_cannot_be_loaded(self):
+        result = video.max_chars_per_line(
+            "/nonexistent/dir/SomeFont.ttf", 60, 972, "some sample text"
+        )
+
+        self.assertIsNone(result)
+
     def test_wrap_text_keeps_closing_punctuation_with_text(self):
         """
         中文长句按字符换行时，句号等闭合标点不能独占一行，否则字幕背景

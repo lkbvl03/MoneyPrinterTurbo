@@ -515,6 +515,37 @@ def generate_audio(task_id, params, video_script, voice_preview=None):
             return None, None, None
         return custom_audio_file, audio_duration, None
 
+def _resolve_subtitle_max_line_length(params, video_script) -> int:
+    """结合“每行大致字数”偏好和按实际字体/字号测量出的像素上限，取两者中
+    较小的一个。固定字符数只是一个大致猜测——字号越大，同样字符数占用的
+    像素越宽，超过固定上限时仍会在渲染时被继续换成多行。用实际测量收紧
+    上限，才能让短视频/长视频字幕在用户选择的字号下都保持单行。测量失败
+    （字体缺失等）时回退到固定上限，不影响正常生成。
+    """
+    preferred_cap = (
+        _SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH
+        if params.video_aspect in _SHORT_FORM_VIDEO_ASPECTS
+        else _LONG_FORM_SUBTITLE_MAX_LINE_LENGTH
+    )
+
+    # 部分调用方（如历史测试里的最小 duck-typed 对象）只保证 subtitle_enabled
+    # 和 video_aspect 存在；用 getattr 兜底，缺失时直接回退到固定上限。
+    font_name = getattr(params, "font_name", None) or "STHeitiMedium.ttc"
+    font_size = getattr(params, "font_size", None) or 60
+    font_path = os.path.join(utils.font_dir(), font_name)
+    if os.name == "nt":
+        font_path = font_path.replace("\\", "/")
+    video_width, _ = VideoAspect(params.video_aspect).to_resolution()
+    max_width = int(video_width * 0.9)
+
+    pixel_cap = video.max_chars_per_line(
+        font_path, int(font_size), max_width, video_script
+    )
+    if pixel_cap is None:
+        return preferred_cap
+    return min(preferred_cap, pixel_cap)
+
+
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     '''
     Generate subtitle for the video script.
@@ -535,11 +566,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         logger.info("subtitle provider is empty, skip subtitle generation")
         return ""
 
-    max_line_length = (
-        _SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH
-        if params.video_aspect in _SHORT_FORM_VIDEO_ASPECTS
-        else _LONG_FORM_SUBTITLE_MAX_LINE_LENGTH
-    )
+    max_line_length = _resolve_subtitle_max_line_length(params, video_script)
 
     if sub_maker is None and subtitle_provider != "whisper":
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的

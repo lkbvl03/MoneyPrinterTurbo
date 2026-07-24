@@ -594,6 +594,62 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(failed_task["failed_stage"], "audio")
         self.assertIn("does not exist", failed_task["error"])
 
+    def test_resolve_subtitle_max_line_length_uses_pixel_cap_when_smaller(self):
+        """
+        固定的“每行大致字数”上限只是一个大致猜测；字号较大时同样字数会占用
+        更多像素，这里验证结果会收紧到按实际字体测量出的、真正能塞进一行的
+        字符数，而不是死板地用 40。
+        """
+        fonts_dir = Path(__file__).parent.parent.parent / "resource" / "fonts"
+        params = VideoParams(
+            video_subject="font size test",
+            video_aspect="9:16",
+            font_name="BeVietnamPro-Bold.ttf",
+            font_size=90,
+        )
+
+        with patch.object(tm.utils, "font_dir", return_value=str(fonts_dir)):
+            result = tm._resolve_subtitle_max_line_length(
+                params, "la ban dang dung cuoc doi cua nguoi khac"
+            )
+
+        self.assertLess(result, tm._SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH)
+
+    def test_resolve_subtitle_max_line_length_uses_preferred_cap_when_pixel_allows_more(
+        self,
+    ):
+        """
+        字号很小时一行能放下的字符数会超过 7 个词的节奏偏好；这种情况仍然
+        应该保留固定上限，不能因为像素空间够用就让单行字幕变得过长。
+        """
+        fonts_dir = Path(__file__).parent.parent.parent / "resource" / "fonts"
+        params = VideoParams(
+            video_subject="font size test",
+            video_aspect="9:16",
+            font_name="BeVietnamPro-Bold.ttf",
+            font_size=20,
+        )
+
+        with patch.object(tm.utils, "font_dir", return_value=str(fonts_dir)):
+            result = tm._resolve_subtitle_max_line_length(
+                params, "la ban dang dung cuoc doi cua nguoi khac"
+            )
+
+        self.assertEqual(result, tm._SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH)
+
+    def test_resolve_subtitle_max_line_length_falls_back_when_measurement_fails(self):
+        """字体测量失败（例如字体文件缺失）时应回退到固定上限，不能崩溃。"""
+        params = VideoParams(
+            video_subject="font size test",
+            video_aspect="16:9",
+            font_name="does-not-exist.ttf",
+            font_size=60,
+        )
+
+        result = tm._resolve_subtitle_max_line_length(params, "some sample text")
+
+        self.assertEqual(result, tm._LONG_FORM_SUBTITLE_MAX_LINE_LENGTH)
+
     def test_generate_subtitle_uses_whisper_for_custom_audio_without_sub_maker(self):
         """
         自定义音频不会经过 TTS，所以没有 sub_maker。
@@ -626,6 +682,10 @@ class TestTaskService(unittest.TestCase):
                     tm.subtitle, "create", side_effect=fake_whisper_create
                 ) as create,
                 patch.object(tm.subtitle, "correct") as correct,
+                # 这个测试关心的是 provider 回退编排是否正确调用，不关心具体
+                # 字体的像素测量结果；固定回退到偏好上限，避免与第三方字体
+                # 文件的实际渲染指标耦合。
+                patch.object(tm.video, "max_chars_per_line", return_value=None),
             ):
                 subtitle_path = tm.generate_subtitle(
                     task_id=task_id,
@@ -680,6 +740,7 @@ class TestTaskService(unittest.TestCase):
                 ) as whisper_create,
                 patch.object(tm.subtitle, "correct") as whisper_correct,
                 patch.object(tm.voice, "create_subtitle") as create_subtitle,
+                patch.object(tm.video, "max_chars_per_line", return_value=None),
             ):
                 subtitle_path = tm.generate_subtitle(
                     task_id=task_id,

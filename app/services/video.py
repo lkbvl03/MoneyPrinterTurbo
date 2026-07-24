@@ -1087,6 +1087,36 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+def max_chars_per_line(
+    font_path: str, font_size: int, max_width: int, sample_text: str
+) -> Optional[int]:
+    """按实际字体、字号测量示例文本的平均字符宽度，估算一行能放下的最大
+    字符数。固定字符数上限（如短视频每行 40 字）只是一个大致的“单行”猜测，
+    字号越大同样的字符数占用的像素越宽——不据此调整的话，字幕分段和渲染时
+    真正的按像素换行会各算各的，导致文字仍然被换成多行。返回 None 表示无法
+    测量（字体加载失败等），调用方应回退到固定上限。
+    """
+    sample = str(sample_text or "").strip()
+    if not sample or max_width <= 0 or font_size <= 0:
+        return None
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except Exception as e:
+        logger.warning(f"failed to load font to estimate line length: {font_path}, {e}")
+        return None
+
+    sample = sample[:200]
+    left, top, right, bottom = font.getbbox(sample)
+    width = right - left
+    if width <= 0:
+        return None
+
+    avg_char_width = width / len(sample)
+    if avg_char_width <= 0:
+        return None
+    return max(1, int(max_width / avg_char_width))
+
+
 def _resolve_subtitle_font_path(font_path: str, subtitle_text: str) -> str:
     """选中字体缺少字幕文字的字形时，在同目录下寻找能显示该文字的字体，
     避免把方框(tofu)烧录进最终视频。找不到可用备选字体时保留原字体，
