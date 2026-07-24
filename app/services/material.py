@@ -308,7 +308,7 @@ def download_videos(
     video_aspect: VideoAspect = VideoAspect.portrait,
     video_concat_mode: VideoConcatMode = VideoConcatMode.random,
     audio_duration: float = 0.0,
-    max_clip_duration: int = 5,
+    max_clip_duration: int = 7,
     match_script_order: bool = False,
 ) -> List[str]:
     search_videos = search_videos_pexels

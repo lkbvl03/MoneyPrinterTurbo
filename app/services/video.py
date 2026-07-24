@@ -616,7 +616,7 @@ def combine_videos(
     video_concat_mode: VideoConcatMode = VideoConcatMode.random,
     video_transition_mode: VideoTransitionMode = None,
     video_transition_style: Optional[str] = None,
-    max_clip_duration: int = 5,
+    max_clip_duration: int = 7,
     threads: int = 2,
     clip_speed: float = 1.0,
 ) -> str:

@@ -910,7 +910,7 @@ def _apply_pending_task_restore():
         params.get("video_aspect") or VideoAspect.portrait.value,
     )
     _set_stable_widget_value(
-        "video_clip_duration_select", params.get("video_clip_duration", 3)
+        "video_clip_duration_select", params.get("video_clip_duration", 7)
     )
     _set_stable_widget_value(
         "video_clip_speed_slider",
@@ -2325,7 +2325,7 @@ def _render_video_settings(panel, params):
             params.video_clip_duration = stable_selectbox(
                 tr("Clip Duration"),
                 options=[2, 3, 4, 5, 6, 7, 8, 9, 10],
-                default_value=3,
+                default_value=7,
                 key="video_clip_duration_select",
                 help=tr("Clip Duration Help"),
             )
