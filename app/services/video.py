@@ -1087,6 +1087,39 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+def _resolve_subtitle_font_path(font_path: str, subtitle_text: str) -> str:
+    """选中字体缺少字幕文字的字形时，在同目录下寻找能显示该文字的字体，
+    避免把方框(tofu)烧录进最终视频。找不到可用备选字体时保留原字体，
+    只记录警告，不阻断渲染。"""
+    if not subtitle_text or subtitle_font_supports_text(font_path, subtitle_text):
+        return font_path
+
+    fonts_dir = os.path.dirname(font_path)
+    if not os.path.isdir(fonts_dir):
+        logger.warning(
+            f"subtitle font is missing required glyphs and no fallback fonts dir "
+            f"was found: {font_path}"
+        )
+        return font_path
+
+    for name in sorted(os.listdir(fonts_dir)):
+        candidate = os.path.join(fonts_dir, name)
+        if candidate == font_path or not os.path.isfile(candidate):
+            continue
+        if subtitle_font_supports_text(candidate, subtitle_text):
+            logger.warning(
+                f"subtitle font '{os.path.basename(font_path)}' is missing glyphs "
+                f"for this text; falling back to '{name}'"
+            )
+            return candidate
+
+    logger.warning(
+        f"no bundled font supports the subtitle text; keeping selected font "
+        f"despite missing glyphs: {font_path}"
+    )
+    return font_path
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1123,6 +1156,15 @@ def generate_video(
         font_path = os.path.join(utils.font_dir(), params.font_name)
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
+
+        if subtitle_path and os.path.exists(subtitle_path):
+            try:
+                with open(subtitle_path, "r", encoding="utf-8") as subtitle_file:
+                    subtitle_text_sample = subtitle_file.read()
+            except OSError as e:
+                logger.warning(f"failed to read subtitle file for font check: {e}")
+                subtitle_text_sample = ""
+            font_path = _resolve_subtitle_font_path(font_path, subtitle_text_sample)
 
         logger.info(f"  ⑤ font: {font_path}")
 

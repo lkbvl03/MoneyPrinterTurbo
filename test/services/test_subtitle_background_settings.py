@@ -141,6 +141,42 @@ class TestSubtitleBackgroundSettings(unittest.TestCase):
             )
         )
 
+    def test_resolve_subtitle_font_path_falls_back_when_glyphs_missing(self):
+        """
+        STHeitiMedium 缺少越南语变音符号字形；选中该字体渲染越南语字幕时，
+        应自动换成同目录下能显示该文字的字体（如 BeVietnamPro），而不是把
+        方框(tofu)烧录进最终视频。
+        """
+        fonts_dir = Path(__file__).parent.parent.parent / "resource" / "fonts"
+        vietnamese_text = "bạn đang dùng cuộc đời của người khác"
+
+        resolved = video._resolve_subtitle_font_path(
+            str(fonts_dir / "STHeitiMedium.ttc"), vietnamese_text
+        )
+
+        self.assertTrue(video.subtitle_font_supports_text(resolved, vietnamese_text))
+        self.assertNotEqual(resolved, str(fonts_dir / "STHeitiMedium.ttc"))
+
+    def test_resolve_subtitle_font_path_keeps_font_when_supported(self):
+        fonts_dir = Path(__file__).parent.parent.parent / "resource" / "fonts"
+        chinese_text = "人工智能改变生活"
+        original = str(fonts_dir / "MicrosoftYaHeiBold.ttc")
+
+        resolved = video._resolve_subtitle_font_path(original, chinese_text)
+
+        self.assertEqual(resolved, original)
+
+    def test_resolve_subtitle_font_path_keeps_font_when_no_fallback_supports_text(self):
+        """
+        找不到任何支持该文字的备用字体时，保留原字体（不抛异常），让上层
+        日志和用户自行处理，而不是让渲染在这里崩溃。
+        """
+        resolved = video._resolve_subtitle_font_path(
+            "/nonexistent/dir/SomeFont.ttf", "bạn đang dùng"
+        )
+
+        self.assertEqual(resolved, "/nonexistent/dir/SomeFont.ttf")
+
     def test_wrap_text_keeps_closing_punctuation_with_text(self):
         """
         中文长句按字符换行时，句号等闭合标点不能独占一行，否则字幕背景
