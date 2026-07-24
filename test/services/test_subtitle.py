@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.services import subtitle
+from app.utils import utils
 
 
 class TestSubtitleService(unittest.TestCase):
@@ -200,6 +201,37 @@ class TestSubtitleService(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0][1], "00:00:00,100 --> 00:00:02,000")
         self.assertEqual(items[0][2], "Hello world")
+
+    def test_correct_with_max_line_length_keeps_lines_within_cap(self):
+        """
+        短视频设置了 max_line_length 时，Whisper 转写出的零碎片段被拼回原句的
+        逻辑必须也遵守同样的长度上限，否则会把已经按长度拆好的字幕重新合并成
+        一整句超长文本（回归此前发现的问题：短视频字幕单行远超预期长度）。
+        """
+        video_script = (
+            "nhưng khi lòng tự trọng phụ thuộc vào việc hơn hay kém ai đó"
+        )
+        # Whisper 的实际切分通常和按长度切分的边界不一致。
+        original_srt = (
+            "1\n00:00:00,000 --> 00:00:00,500\nnhưng khi lòng\n\n"
+            "2\n00:00:00,500 --> 00:00:01,000\ntự trọng phụ thuộc\n\n"
+            "3\n00:00:01,000 --> 00:00:01,500\nvào việc hơn hay\n\n"
+            "4\n00:00:01,500 --> 00:00:02,000\nkém ai đó\n\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "subtitle.srt"
+            subtitle_file.write_text(original_srt, encoding="utf-8")
+
+            subtitle.correct(str(subtitle_file), video_script, max_line_length=40)
+            items = subtitle.file_to_subtitles(str(subtitle_file))
+
+        expected_lines = utils.split_string_by_punctuations_and_length(
+            video_script, 40
+        )
+        self.assertEqual([item[2] for item in items], expected_lines)
+        for item in items:
+            self.assertLessEqual(len(item[2]), 40)
 
     def test_correct_replaces_mismatch_and_appends_missing_script_line(self):
         """

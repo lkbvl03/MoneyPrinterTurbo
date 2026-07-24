@@ -212,10 +212,17 @@ def similarity(a, b):
     return 1 - (distance / max_length)
 
 
-def correct(subtitle_file, video_script):
+def correct(subtitle_file, video_script, max_line_length: Optional[int] = None):
     subtitle_items = file_to_subtitles(subtitle_file)
     normalized_script = utils.normalize_script_for_subtitle_matching(video_script)
-    script_lines = utils.split_string_by_punctuations(normalized_script)
+    # max_line_length 未设置时保持原有的按标点断句；设置时必须用同样的长度
+    # 上限拆分脚本作为比对基准，否则下面的合并逻辑会把已经按长度拆好的
+    # Whisper 字幕重新拼回一整句原文，超出短视频单行字符上限。
+    script_lines = (
+        utils.split_string_by_punctuations_and_length(normalized_script, max_line_length)
+        if max_line_length
+        else utils.split_string_by_punctuations(normalized_script)
+    )
 
     corrected = False
     new_subtitle_items = []

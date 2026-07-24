@@ -30,9 +30,12 @@ from app.services import state as sm
 from app.utils import file_security, utils
 
 
-# Character cap for a single subtitle line on short-form (9:16 / 1:1) videos.
-# Long-form (16:9) videos keep today's punctuation-only splitting, unchanged.
-_SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH = 50
+# Character cap for a single subtitle line, so it renders as one line
+# regardless of chosen font size instead of wrapping into multiple stacked
+# lines. Short-form (9:16 / 1:1) gets a tighter cap than long-form (16:9),
+# which has a much wider frame to work with.
+_SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH = 40
+_LONG_FORM_SUBTITLE_MAX_LINE_LENGTH = 90
 _SHORT_FORM_VIDEO_ASPECTS = (VideoAspect.portrait.value, VideoAspect.square.value)
 
 # 发布请求最长可等待数分钟，不能继续占用视频生成任务的并发名额。
@@ -535,7 +538,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     max_line_length = (
         _SHORT_FORM_SUBTITLE_MAX_LINE_LENGTH
         if params.video_aspect in _SHORT_FORM_VIDEO_ASPECTS
-        else None
+        else _LONG_FORM_SUBTITLE_MAX_LINE_LENGTH
     )
 
     if sub_maker is None and subtitle_provider != "whisper":
@@ -574,7 +577,11 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
             max_line_length=max_line_length,
         )
         logger.info("\n\n## correcting subtitle")
-        subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
+        subtitle.correct(
+            subtitle_file=subtitle_path,
+            video_script=video_script,
+            max_line_length=max_line_length,
+        )
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)
     if not subtitle_lines:

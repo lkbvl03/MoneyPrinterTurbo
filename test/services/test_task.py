@@ -639,10 +639,12 @@ class TestTaskService(unittest.TestCase):
 
         self.assertTrue(subtitle_path.endswith("subtitle.srt"))
         create.assert_called_once_with(
-            audio_file=audio_file, subtitle_file=subtitle_path, max_line_length=50
+            audio_file=audio_file, subtitle_file=subtitle_path, max_line_length=40
         )
         correct.assert_called_once_with(
-            subtitle_file=subtitle_path, video_script="Hello world."
+            subtitle_file=subtitle_path,
+            video_script="Hello world.",
+            max_line_length=40,
         )
 
     def test_generate_subtitle_falls_back_to_whisper_for_custom_audio_with_edge_provider(self):
@@ -693,7 +695,9 @@ class TestTaskService(unittest.TestCase):
         create_subtitle.assert_not_called()
         whisper_create.assert_called_once()
         whisper_correct.assert_called_once_with(
-            subtitle_file=subtitle_path, video_script="Hello world."
+            subtitle_file=subtitle_path,
+            video_script="Hello world.",
+            max_line_length=40,
         )
 
     def test_generate_subtitle_does_not_fallback_to_whisper_when_edge_fails(self):
