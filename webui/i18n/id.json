@@ -221,6 +221,8 @@
     "Chatterbox Voices": "Suara Chatterbox",
     "Chatterbox Base URL Placeholder": "http://localhost:4123/v1",
     "Chatterbox Voices Placeholder": "default-Female, narrator-Male",
+    "Piper Models Folder": "Folder Model Piper (berisi file suara .onnx)",
+    "Piper Models Folder Placeholder": "C:\\jalur\\ke\\piper-voices",
     "Hide Log": "Sembunyikan Log",
     "Hide Basic Settings": "Sembunyikan Pengaturan Dasar\n\nTersembunyi, panel pengaturan dasar tidak akan ditampilkan di halaman.\n\nJika Anda perlu menampilkannya lagi, silakan atur `hide_config = false` di `config.toml`",
     "LLM Settings": "**Pengaturan LLM**",

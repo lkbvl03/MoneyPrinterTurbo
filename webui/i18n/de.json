@@ -224,6 +224,8 @@
     "Chatterbox Voices": "Chatterbox-Stimmen",
     "Chatterbox Base URL Placeholder": "http://localhost:4123/v1",
     "Chatterbox Voices Placeholder": "default-Female, narrator-Male",
+    "Piper Models Folder": "Piper-Modellordner (enthält .onnx-Sprachdateien)",
+    "Piper Models Folder Placeholder": "C:\\Pfad\\zu\\piper-voices",
     "Hide Log": "Protokoll ausblenden",
     "Hide Basic Settings": "Basis-Einstellungen ausblenden\n\nWenn diese Option deaktiviert ist, wird die Basis-Einstellungen-Leiste nicht auf der Seite angezeigt.\n\nWenn Sie sie erneut anzeigen möchten, setzen Sie `hide_config = false` in `config.toml`",
     "LLM Settings": "**LLM-Einstellungen**",

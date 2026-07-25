@@ -82,6 +82,7 @@ locales = utils.load_locales(i18n_dir)
 DEFAULT_CHATTERBOX_BASE_URL = "http://127.0.0.1:4123/v1"
 DEFAULT_CHATTERBOX_MODEL = "chatterbox"
 DEFAULT_CHATTERBOX_VOICES = ["default-Female"]
+DEFAULT_PIPER_MODELS_DIR = ""
 ONBOARDING_TOUR_KEY = "mpt-onboarding-v1"
 VOICE_MODE_TTS = "tts"
 VOICE_MODE_UPLOAD = "upload"
@@ -162,6 +163,18 @@ def _sync_chatterbox_config_from_session_state():
             config.chatterbox.get("voices") or DEFAULT_CHATTERBOX_VOICES,
         )
     )
+
+
+def _sync_piper_config_from_session_state():
+    # 与 Chatterbox 同理：音色下拉框在 models_dir 输入框之前渲染，试听/生成
+    # 逻辑如果只读 config.piper，可能拿不到用户刚在输入框里填入的新路径。
+    config.piper["models_dir"] = (
+        st.session_state.get(
+            "piper_models_dir_input",
+            config.piper.get("models_dir", DEFAULT_PIPER_MODELS_DIR),
+        )
+        or ""
+    ).strip()
 
 
 def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
@@ -862,6 +875,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "elevenlabs"
     if voice.is_chatterbox_voice(voice_name):
         return "chatterbox"
+    if voice.is_piper_voice(voice_name):
+        return "piper"
     if voice.is_azure_v2_voice(voice_name):
         return "azure-tts-v2"
     return "azure-tts-v1"
@@ -2513,6 +2528,8 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
             "model_id": config.chatterbox.get("model_id", ""),
             "credential": _credential_signature(config.chatterbox.get("api_key", "")),
         }
+    if tts_server == "piper":
+        return {"models_dir": config.piper.get("models_dir", "")}
     return {}
 
 
@@ -3070,6 +3087,7 @@ def _render_audio_settings(panel, params):
                 ("mimo-tts", "Xiaomi MiMo TTS"),
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
+                ("piper", "Piper TTS (Offline)"),
             ]
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
@@ -3136,6 +3154,10 @@ def _render_audio_settings(panel, params):
                 # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
                 _sync_chatterbox_config_from_session_state()
                 filtered_voices = voice.get_chatterbox_voices()
+            elif selected_tts_server == "piper":
+                # 扫描 [piper] models_dir 下的 .onnx 模型文件作为音色列表
+                _sync_piper_config_from_session_state()
+                filtered_voices = voice.get_all_piper_voices()
             else:
                 # 获取Azure的声音列表
                 all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -3158,6 +3180,9 @@ def _render_audio_settings(panel, params):
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
                 if voice.is_chatterbox_voice(v):
+                    name = v.split(":", 1)[1] if ":" in v else v
+                    return name.replace("-Female", "").replace("-Male", "")
+                if voice.is_piper_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
                     return name.replace("-Female", "").replace("-Male", "")
                 return (
@@ -3355,6 +3380,20 @@ def _render_audio_settings(panel, params):
                 config.chatterbox["voices"] = _parse_chatterbox_voices(
                     chatterbox_voices
                 )
+
+            # Piper (offline/local TTS) settings section -- no network/API key,
+            # just the folder holding the .onnx voice models.
+            if tts_mode_enabled and (
+                selected_tts_server == "piper"
+                or (voice_name and voice.is_piper_voice(voice_name))
+            ):
+                piper_models_dir = st.text_input(
+                    tr("Piper Models Folder"),
+                    value=config.piper.get("models_dir", DEFAULT_PIPER_MODELS_DIR),
+                    key="piper_models_dir_input",
+                    placeholder=tr("Piper Models Folder Placeholder"),
+                )
+                config.piper["models_dir"] = (piper_models_dir or "").strip()
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；
             # 上传音频只需要文件和音量；无配音不再展示无效设置。

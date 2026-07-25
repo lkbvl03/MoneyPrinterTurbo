@@ -219,6 +219,8 @@
     "Chatterbox Voices": "Chatterbox Sesleri",
     "Chatterbox Base URL Placeholder": "http://localhost:4123/v1",
     "Chatterbox Voices Placeholder": "default-Female, narrator-Male",
+    "Piper Models Folder": "Piper Model Klasörü (.onnx ses dosyalarını içerir)",
+    "Piper Models Folder Placeholder": "C:\\piper-voices\\yolu",
     "Hide Log": "Günlüğü Gizle",
     "Hide Basic Settings": "Temel Ayarları Gizle\n\nGizlendiği takdirde, temel ayarlar paneli sayfada görüntülenmeyecektir.\n\nTekrar görüntülemek için `config.toml` dosyasında `hide_config = false` olarak ayarlayın",
     "LLM Settings": "**LLM Ayarları**",
