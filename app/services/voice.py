@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+import wave
 from datetime import datetime
 from typing import Optional, Union
 from xml.sax.saxutils import escape, unescape
@@ -187,6 +188,34 @@ def get_chatterbox_voices() -> list[str]:
     return result
 
 
+def get_piper_models_dir() -> str:
+    return (config.piper.get("models_dir", "") or "").strip()
+
+
+def get_all_piper_voices() -> list[str]:
+    """Scan ``[piper] models_dir`` for ``*.onnx`` voice models and return them
+    in the ``piper:<model>-Female``/``piper:<model>-Male`` dispatcher format.
+
+    Piper model filenames don't carry gender in a structured field, only
+    sometimes as a hint in the name itself (e.g. ``en_US-hfc_female-medium``).
+    We guess from that hint and default to Female when it's ambiguous, purely
+    so the name matches the ``-Female``/``-Male`` suffix convention every
+    other provider's voice list already uses in this codebase.
+    """
+    models_dir = get_piper_models_dir()
+    if not models_dir or not os.path.isdir(models_dir):
+        return []
+    voices = []
+    for entry in sorted(os.listdir(models_dir)):
+        if not entry.lower().endswith(".onnx"):
+            continue
+        model_name = entry[: -len(".onnx")]
+        lower = model_name.lower()
+        gender = "Male" if "male" in lower and "female" not in lower else "Female"
+        voices.append(f"piper:{model_name}-{gender}")
+    return voices
+
+
 _AZURE_VOICES_DATA_FILE = os.path.join(
     os.path.dirname(__file__), "data", "azure_voices.json"
 )
@@ -254,6 +283,10 @@ def is_elevenlabs_voice(voice_name: str) -> bool:
 
 def is_chatterbox_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("chatterbox:")
+
+
+def is_piper_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("piper:")
 
 
 def is_no_voice(voice_name: str | None) -> bool:
@@ -442,6 +475,17 @@ def tts(
             )
         else:
             logger.error(f"Invalid chatterbox voice name format: {voice_name}")
+            return None
+    elif is_piper_voice(voice_name):
+        # 格式: piper:<model>，model 可带显示用的 -Female/-Male 后缀
+        parts = voice_name.split(":", 1)
+        if len(parts) >= 2 and parts[1].strip():
+            piper_voice = parts[1].strip()
+            if piper_voice.endswith(("-Female", "-Male")):
+                piper_voice = piper_voice.rsplit("-", 1)[0]
+            return piper_tts(text, piper_voice, voice_file, voice_rate, voice_volume)
+        else:
+            logger.error(f"Invalid piper voice name format: {voice_name}")
             return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
@@ -1449,6 +1493,137 @@ def chatterbox_tts(
             logger.error(f"chatterbox tts failed: {str(e)}")
 
     return None
+
+
+_PIPER_PAUSE_PATTERN = re.compile(r"\{\{\s*([0-9]*\.?[0-9]+)\s*\}\}")
+# PiperVoice.load() 需要先把 .onnx 模型读进内存（通常几十到上百 MB），按模型
+# 路径缓存，避免同一次 CLI 调用里多次合成（例如脚本里有多个 {{暂停}} 分段）
+# 时反复重新加载同一个模型。
+_piper_voice_cache: dict = {}
+
+
+def split_text_with_pauses(raw_text: str) -> list[tuple[str, object]]:
+    """把文本拆分成 [("text", str) | ("pause", float), ...] 交替序列。
+
+    停顿语法: 在文本中插入 ``{{秒数}}``，例如::
+
+        "Xin chào. {{1.0}} Hôm nay chúng ta học bài mới."
+
+    会读出 "Xin chào."，静音精确 1.0 秒，再读出 "Hôm nay chúng ta học bài mới."。
+    与 Text-to-Speech-Offline/tts_ngat_nhip.py 参考脚本使用同一套语法，方便
+    用户复用已经熟悉的写法。
+    """
+    parts: list[tuple[str, object]] = []
+    last_end = 0
+    for match in _PIPER_PAUSE_PATTERN.finditer(raw_text):
+        text_chunk = raw_text[last_end : match.start()].strip()
+        if text_chunk:
+            parts.append(("text", text_chunk))
+        parts.append(("pause", float(match.group(1))))
+        last_end = match.end()
+
+    tail = raw_text[last_end:].strip()
+    if tail:
+        parts.append(("text", tail))
+
+    return parts
+
+
+def piper_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """Generate speech with Piper (https://github.com/OHF-Voice/piper1-gpl),
+    a local/offline neural TTS engine -- no network or API key required.
+
+    Reads ``.onnx`` voice models from ``[piper] models_dir`` in config.toml.
+    Supports inline ``{{seconds}}`` pause markers in the script text (see
+    ``split_text_with_pauses``).
+
+    Like Chatterbox/ElevenLabs, Piper's simple synthesis API here doesn't
+    expose word-level timestamps, so the subtitle path falls back to the
+    full-text SubMaker. For tighter subtitle sync set
+    ``subtitle_provider = "whisper"``.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error("Piper TTS text is empty")
+        return None
+
+    try:
+        from piper import PiperVoice
+        from piper.config import SynthesisConfig
+    except ImportError as e:
+        logger.error(
+            f"piper-tts is not installed ({e}). Install it with "
+            f"`uv add piper-tts` (or `pip install piper-tts`) to use offline "
+            f"Piper voices."
+        )
+        return None
+
+    models_dir = get_piper_models_dir()
+    if not models_dir:
+        logger.error(
+            "Piper models_dir is not set, please configure [piper] models_dir "
+            "in config.toml"
+        )
+        return None
+
+    model_path = os.path.join(models_dir, f"{voice}.onnx")
+    if not os.path.isfile(model_path):
+        logger.error(f"Piper voice model not found: {model_path}")
+        return None
+
+    parts = split_text_with_pauses(text)
+    if not parts:
+        logger.error("Piper TTS produced no speakable content")
+        return None
+
+    try:
+        piper_voice = _piper_voice_cache.get(model_path)
+        if piper_voice is None:
+            logger.info(f"loading piper model: {model_path}")
+            piper_voice = PiperVoice.load(model_path)
+            _piper_voice_cache[model_path] = piper_voice
+
+        # MPT 的 voice_rate 语义是 edge-tts 风格：>1.0 更快。Piper 的
+        # length_scale 正好相反（数值越大越慢），需要取倒数换算。
+        safe_rate = max(0.1, float(voice_rate or 1.0))
+        syn_config = SynthesisConfig(length_scale=1.0 / safe_rate)
+
+        from pydub import AudioSegment
+
+        _configure_pydub_ffmpeg(AudioSegment)
+
+        final_audio = AudioSegment.empty()
+        for kind, value in parts:
+            if kind == "text":
+                buffer = io.BytesIO()
+                with wave.open(buffer, "wb") as wav_file:
+                    piper_voice.synthesize_wav(value, wav_file, syn_config=syn_config)
+                buffer.seek(0)
+                final_audio += AudioSegment.from_wav(buffer)
+            else:
+                final_audio += AudioSegment.silent(duration=int(value * 1000))
+
+        ensure_file_path_exists(voice_file)
+        export_format = os.path.splitext(voice_file)[1].lstrip(".").lower() or "mp3"
+        final_audio.export(voice_file, format=export_format)
+
+        audio_duration = len(final_audio) / 1000.0
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        logger.success(f"piper tts succeeded: {voice_file}")
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=audio_duration,
+        )
+    except Exception as e:
+        logger.error(f"piper tts failed: {str(e)}")
+        return None
 
 
 def _format_text(text: str) -> str:

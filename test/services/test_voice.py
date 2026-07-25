@@ -709,6 +709,191 @@ class TestVoiceService(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(post.call_count, 3)
 
+    # ---------------------------------------------------------------
+    # Piper (offline/local) TTS
+    # ---------------------------------------------------------------
+
+    def _install_fake_piper_module(self, load_calls, synth_calls, seconds_per_call=0.2):
+        """Install a fake ``piper`` package into sys.modules so piper_tts()
+        can be exercised without the real (large, model-loading) library."""
+        import types
+
+        class _FakeSynthesisConfig:
+            def __init__(self, length_scale=1.0):
+                self.length_scale = length_scale
+
+        fake_config_module = types.ModuleType("piper.config")
+        fake_config_module.SynthesisConfig = _FakeSynthesisConfig
+
+        class _FakePiperVoiceInstance:
+            def synthesize_wav(self, text, wav_file, syn_config=None):
+                synth_calls.append((text, syn_config))
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                frame_count = int(16000 * seconds_per_call)
+                wav_file.writeframes(b"\x00\x00" * frame_count)
+
+        class _FakePiperVoice:
+            @staticmethod
+            def load(path):
+                load_calls.append(path)
+                return _FakePiperVoiceInstance()
+
+        fake_piper_module = types.ModuleType("piper")
+        fake_piper_module.PiperVoice = _FakePiperVoice
+        fake_piper_module.config = fake_config_module
+
+        return patch.dict(
+            sys.modules, {"piper": fake_piper_module, "piper.config": fake_config_module}
+        )
+
+    def test_piper_voice_helpers(self):
+        self.assertTrue(vs.is_piper_voice("piper:vi_VN-vais1000-medium-Female"))
+        self.assertFalse(vs.is_piper_voice("chatterbox:default-Female"))
+        self.assertFalse(vs.is_piper_voice(""))
+        self.assertFalse(vs.is_piper_voice(None))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            Path(tmp_dir, "vi_VN-vais1000-medium.onnx").write_bytes(b"x")
+            Path(tmp_dir, "en_US-hfc_male-medium.onnx").write_bytes(b"x")
+            Path(tmp_dir, "en_US-hfc_female-medium.onnx").write_bytes(b"x")
+            Path(tmp_dir, "readme.txt").write_bytes(b"not a model")
+
+            with patch.object(vs.config, "piper", {"models_dir": tmp_dir}):
+                voices = vs.get_all_piper_voices()
+
+        self.assertEqual(
+            voices,
+            [
+                "piper:en_US-hfc_female-medium-Female",
+                "piper:en_US-hfc_male-medium-Male",
+                "piper:vi_VN-vais1000-medium-Female",
+            ],
+        )
+
+    def test_get_all_piper_voices_returns_empty_when_unconfigured_or_missing(self):
+        with patch.object(vs.config, "piper", {}):
+            self.assertEqual(vs.get_all_piper_voices(), [])
+        with patch.object(vs.config, "piper", {"models_dir": "/does/not/exist"}):
+            self.assertEqual(vs.get_all_piper_voices(), [])
+
+    def test_split_text_with_pauses(self):
+        parts = vs.split_text_with_pauses(
+            "Xin chào. {{1.0}} Hôm nay chúng ta học bài mới. {{0.5}} Bắt đầu nhé!"
+        )
+        self.assertEqual(
+            parts,
+            [
+                ("text", "Xin chào."),
+                ("pause", 1.0),
+                ("text", "Hôm nay chúng ta học bài mới."),
+                ("pause", 0.5),
+                ("text", "Bắt đầu nhé!"),
+            ],
+        )
+
+    def test_split_text_with_pauses_handles_no_markers(self):
+        self.assertEqual(
+            vs.split_text_with_pauses("plain text, no pauses"),
+            [("text", "plain text, no pauses")],
+        )
+
+    def test_piper_tts_synthesizes_and_returns_legacy_submaker(self):
+        load_calls, synth_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_path = Path(tmp_dir) / "vi_VN-test-medium.onnx"
+            model_path.write_bytes(b"fake-onnx")
+            voice_file = str(Path(tmp_dir) / "out.wav")
+
+            with patch.object(
+                vs.config, "piper", {"models_dir": tmp_dir}
+            ), self._install_fake_piper_module(load_calls, synth_calls):
+                sub_maker = vs.piper_tts(
+                    text="Xin chào các bạn.",
+                    voice="vi_VN-test-medium",
+                    voice_file=voice_file,
+                    voice_rate=1.0,
+                )
+
+            self.assertIsNotNone(sub_maker)
+            self.assertTrue(getattr(sub_maker, "subs", []))
+            self.assertEqual(load_calls, [str(model_path)])
+            self.assertEqual(len(synth_calls), 1)
+            self.assertEqual(synth_calls[0][0], "Xin chào các bạn.")
+            self.assertTrue(Path(voice_file).is_file())
+            self.assertGreater(Path(voice_file).stat().st_size, 0)
+
+    def test_piper_tts_applies_pause_syntax_as_silence(self):
+        load_calls, synth_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            Path(tmp_dir, "v.onnx").write_bytes(b"fake-onnx")
+            voice_file = str(Path(tmp_dir) / "out.wav")
+
+            with patch.object(
+                vs.config, "piper", {"models_dir": tmp_dir}
+            ), self._install_fake_piper_module(load_calls, synth_calls, seconds_per_call=0.2):
+                sub_maker = vs.piper_tts(
+                    text="Phần một. {{1.0}} Phần hai.",
+                    voice="v",
+                    voice_file=voice_file,
+                    voice_rate=1.0,
+                )
+
+            self.assertIsNotNone(sub_maker)
+            # only the two "text" parts are synthesized -- the pause marker
+            # itself never reaches the TTS engine as speakable text
+            self.assertEqual(
+                [call[0] for call in synth_calls], ["Phần một.", "Phần hai."]
+            )
+            # 0.2s + 0.2s speech + 1.0s silence =~ 1.4s total
+            audio = AudioSegment.from_file(voice_file)
+            self.assertAlmostEqual(len(audio) / 1000.0, 1.4, delta=0.05)
+
+    def test_piper_tts_inverts_voice_rate_to_piper_length_scale(self):
+        load_calls, synth_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            Path(tmp_dir, "v.onnx").write_bytes(b"fake-onnx")
+            voice_file = str(Path(tmp_dir) / "out.wav")
+
+            with patch.object(
+                vs.config, "piper", {"models_dir": tmp_dir}
+            ), self._install_fake_piper_module(load_calls, synth_calls):
+                vs.piper_tts(
+                    text="hello",
+                    voice="v",
+                    voice_file=voice_file,
+                    voice_rate=2.0,  # MPT convention: 2.0 = twice as fast
+                )
+
+        # Piper's length_scale is the inverse: larger = slower. 2x faster
+        # speech means half the length_scale.
+        self.assertAlmostEqual(synth_calls[0][1].length_scale, 0.5)
+
+    def test_piper_tts_requires_models_dir(self):
+        with patch.object(vs.config, "piper", {"models_dir": ""}):
+            result = vs.piper_tts(text="hi", voice="v", voice_file="unused.wav")
+        self.assertIsNone(result)
+
+    def test_piper_tts_missing_model_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.object(vs.config, "piper", {"models_dir": tmp_dir}):
+                result = vs.piper_tts(
+                    text="hi", voice="does-not-exist", voice_file="unused.wav"
+                )
+        self.assertIsNone(result)
+
+    def test_piper_tts_returns_none_when_text_is_empty(self):
+        result = vs.piper_tts(text="   ", voice="v", voice_file="unused.wav")
+        self.assertIsNone(result)
+
+    def test_piper_tts_returns_none_when_piper_not_installed(self):
+        with patch.object(
+            vs.config, "piper", {"models_dir": "/whatever"}
+        ), patch.dict(sys.modules, {"piper": None}):
+            result = vs.piper_tts(text="hi", voice="v", voice_file="unused.wav")
+        self.assertIsNone(result)
+
     def test_generate_subtitle_keeps_edge_provider_for_gemini_legacy_submaker(self):
         """
         验证 Gemini TTS 返回的 legacy 字幕结构在 edge provider 下可以直接产出
