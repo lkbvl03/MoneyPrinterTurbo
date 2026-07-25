@@ -602,6 +602,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
             audio_file=audio_file,
             subtitle_file=subtitle_path,
             max_line_length=max_line_length,
+            video_script=video_script,
         )
         logger.info("\n\n## correcting subtitle")
         subtitle.correct(

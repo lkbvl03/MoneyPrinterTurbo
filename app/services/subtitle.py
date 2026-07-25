@@ -18,8 +18,86 @@ device = config.whisper.get("device", "cpu")
 compute_type = config.whisper.get("compute_type", "int8")
 model = None
 
+# 找不到已识别词可参考语速时的保底值：大致的中等语速朗读节奏。
+_DEFAULT_CHARS_PER_SECOND = 12.0
+_MIN_EXTRAPOLATED_DURATION = 0.5
 
-def create(audio_file, subtitle_file: str = "", max_line_length: Optional[int] = None):
+
+def _flatten_whisper_words(segments):
+    """把 Whisper 按 segment 分组的逐词结果展平成一条按时间顺序排列的
+    (文字, 开始秒, 结束秒) 列表，丢弃 segment 自身的分段边界——后续按脚本
+    词序位置对齐时，只需要每个词自己的时间，不需要 Whisper 认为哪些词属于
+    同一段。"""
+    words = []
+    for segment in segments:
+        if not segment.words:
+            continue
+        for word in segment.words:
+            text = word.word.strip()
+            if text:
+                words.append((text, word.start, word.end))
+    return words
+
+
+def _chars_per_second_from_words(words) -> float:
+    if not words:
+        return _DEFAULT_CHARS_PER_SECOND
+    total_chars = sum(len(text) for text, _, _ in words)
+    total_seconds = words[-1][2] - words[0][1]
+    if total_chars <= 0 or total_seconds <= 0:
+        return _DEFAULT_CHARS_PER_SECOND
+    return total_chars / total_seconds
+
+
+def _align_script_lines_to_word_timestamps(script_lines, whisper_words):
+    """把已经按标点/长度分好的脚本行，按词序位置对应到 Whisper 逐词识别出
+    的真实时间戳（第 i 个脚本词直接用第 i 个 Whisper 词的时间），而不是像
+    correct() 那样用整句文本相似度去猜该合并哪些片段。
+
+    真实渲染中发现的问题：脚本行边界和 Whisper 自己识别出的分段边界没对齐
+    时，整句匹配会把边界词的时间错误地并入相邻的字幕行，导致该词的字幕比
+    实际读到的时间提前或延后出现。按位置对齐从根源上避免这个问题——即使
+    Whisper 把某个词识别成完全不同的文字，只要词的顺序、数量大致对应，
+    这里只用它的时间，不用它的文字，就不会互相污染。
+
+    Whisper 词数不够时，剩余的词按已识别部分的语速连续外推，不使用
+    00:00:00,000 占位。
+    """
+    chars_per_second = _chars_per_second_from_words(whisper_words)
+    results = []
+    word_cursor = 0
+    next_start = 0.0
+    for line in script_lines:
+        words_in_line = line.split()
+        if not words_in_line:
+            continue
+        start_index = word_cursor
+        end_index = word_cursor + len(words_in_line) - 1
+        word_cursor += len(words_in_line)
+
+        if start_index < len(whisper_words):
+            line_start = whisper_words[start_index][1]
+        else:
+            line_start = next_start
+
+        if end_index < len(whisper_words):
+            line_end = whisper_words[end_index][2]
+        else:
+            duration = max(len(line) / chars_per_second, _MIN_EXTRAPOLATED_DURATION)
+            line_end = line_start + duration
+
+        line_end = max(line_end, line_start + _MIN_EXTRAPOLATED_DURATION)
+        results.append((line, line_start, line_end))
+        next_start = line_end
+    return results
+
+
+def create(
+    audio_file,
+    subtitle_file: str = "",
+    max_line_length: Optional[int] = None,
+    video_script: str = "",
+):
     global model
     if WhisperModel is None:
         logger.warning("faster_whisper not available, skipping whisper subtitle generation")
@@ -67,72 +145,92 @@ def create(audio_file, subtitle_file: str = "", max_line_length: Optional[int] =
     start = timer()
     subtitles = []
 
-    def recognized(seg_text, seg_start, seg_end):
-        seg_text = seg_text.strip()
-        if not seg_text:
-            return
-
-        msg = "[%.2fs -> %.2fs] %s" % (seg_start, seg_end, seg_text)
-        logger.debug(msg)
-
-        subtitles.append(
-            {"msg": seg_text, "start_time": seg_start, "end_time": seg_end}
+    if video_script:
+        # 有脚本原文可用时，按词序位置直接对应 Whisper 逐词时间戳，而不是
+        # 用 Whisper 自己的分段+标点断句猜测字幕行——见
+        # _align_script_lines_to_word_timestamps 的说明：这是真实渲染中发现
+        # 的字幕/语音错位问题的根本修复。
+        normalized_script = utils.normalize_script_for_subtitle_matching(video_script)
+        script_lines = (
+            utils.split_string_by_punctuations_and_length(normalized_script, max_line_length)
+            if max_line_length
+            else utils.split_string_by_punctuations(normalized_script)
         )
+        whisper_words = _flatten_whisper_words(segments)
+        for text, line_start, line_end in _align_script_lines_to_word_timestamps(
+            script_lines, whisper_words
+        ):
+            subtitles.append(
+                {"msg": text, "start_time": line_start, "end_time": line_end}
+            )
+    else:
 
-    for segment in segments:
-        words_idx = 0
-        words_len = len(segment.words)
+        def recognized(seg_text, seg_start, seg_end):
+            seg_text = seg_text.strip()
+            if not seg_text:
+                return
 
-        seg_start = 0
-        seg_end = 0
-        seg_text = ""
+            msg = "[%.2fs -> %.2fs] %s" % (seg_start, seg_end, seg_text)
+            logger.debug(msg)
 
-        if segment.words:
-            is_segmented = False
-            for word in segment.words:
-                if not is_segmented:
-                    seg_start = word.start
-                    is_segmented = True
+            subtitles.append(
+                {"msg": seg_text, "start_time": seg_start, "end_time": seg_end}
+            )
 
-                # 在真正拼接这个词之前检查：如果加上它会超过字符上限，就先把
-                # 已经累积的文本作为一条独立字幕提交，再让这个词开启新的一段。
-                # 必须在拼接前判断（而不是拼接后再检查），否则每条字幕会被
-                # 多拼进一个词，超出 max_line_length 上限。
-                would_exceed_length = (
-                    max_line_length is not None
-                    and seg_text.strip()
-                    and len((seg_text + word.word).strip()) > max_line_length
-                )
-                if would_exceed_length:
-                    recognized(seg_text.strip(), seg_start, seg_end)
-                    seg_text = ""
-                    seg_start = word.start
+        for segment in segments:
+            words_idx = 0
+            words_len = len(segment.words)
 
-                seg_end = word.end
-                # If it contains punctuation, then break the sentence.
-                seg_text += word.word
+            seg_start = 0
+            seg_end = 0
+            seg_text = ""
 
-                if utils.str_contains_punctuation(word.word):
-                    # remove last char
-                    seg_text = seg_text[:-1]
-                    if not seg_text:
-                        continue
+            if segment.words:
+                is_segmented = False
+                for word in segment.words:
+                    if not is_segmented:
+                        seg_start = word.start
+                        is_segmented = True
 
-                    recognized(seg_text, seg_start, seg_end)
+                    # 在真正拼接这个词之前检查：如果加上它会超过字符上限，就先把
+                    # 已经累积的文本作为一条独立字幕提交，再让这个词开启新的一段。
+                    # 必须在拼接前判断（而不是拼接后再检查），否则每条字幕会被
+                    # 多拼进一个词，超出 max_line_length 上限。
+                    would_exceed_length = (
+                        max_line_length is not None
+                        and seg_text.strip()
+                        and len((seg_text + word.word).strip()) > max_line_length
+                    )
+                    if would_exceed_length:
+                        recognized(seg_text.strip(), seg_start, seg_end)
+                        seg_text = ""
+                        seg_start = word.start
 
-                    is_segmented = False
-                    seg_text = ""
-
-                if words_idx == 0 and segment.start < word.start:
-                    seg_start = word.start
-                if words_idx == (words_len - 1) and segment.end > word.end:
                     seg_end = word.end
-                words_idx += 1
+                    # If it contains punctuation, then break the sentence.
+                    seg_text += word.word
 
-        if not seg_text:
-            continue
+                    if utils.str_contains_punctuation(word.word):
+                        # remove last char
+                        seg_text = seg_text[:-1]
+                        if not seg_text:
+                            continue
 
-        recognized(seg_text, seg_start, seg_end)
+                        recognized(seg_text, seg_start, seg_end)
+
+                        is_segmented = False
+                        seg_text = ""
+
+                    if words_idx == 0 and segment.start < word.start:
+                        seg_start = word.start
+                    if words_idx == (words_len - 1) and segment.end > word.end:
+                        seg_end = word.end
+                    words_idx += 1
+
+            if not seg_text:
+                continue
+
+            recognized(seg_text, seg_start, seg_end)
 
     end = timer()
 
@@ -210,11 +308,6 @@ def similarity(a, b):
     distance = levenshtein_distance(a.lower(), b.lower())
     max_length = max(len(a), len(b))
     return 1 - (distance / max_length)
-
-
-# 找不到已匹配片段可参考语速时的保底值：大致的中等语速朗读节奏。
-_DEFAULT_CHARS_PER_SECOND = 12.0
-_MIN_EXTRAPOLATED_DURATION = 0.5
 
 
 def _estimate_chars_per_second(matched_items) -> float:

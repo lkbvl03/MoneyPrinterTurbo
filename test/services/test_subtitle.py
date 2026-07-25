@@ -148,6 +148,106 @@ class TestSubtitleService(unittest.TestCase):
         for item in items:
             self.assertLessEqual(len(item[2]), 15)
 
+    def test_create_with_video_script_aligns_by_word_position_not_text(self):
+        """
+        真实渲染中发现的问题复现：脚本行边界和 Whisper 自己识别出的分段边界
+        不一致时，旧的整句文本相似度匹配（correct()）会把边界词的时间错误
+        地并入相邻的字幕行，导致文字比实际读到的时间提前或延后出现。传入
+        video_script 后按词的位置直接对应 Whisper 逐词时间戳——即使 Whisper
+        把这些词识别成完全不同的（错误）文字、且不按脚本行边界分段，只要
+        词的数量和顺序对应，每一行的时间戳依然精确来自它自己包含的词，不
+        会互相污染。
+        """
+
+        class _FakeWhisperModel:
+            def __init__(self, **kwargs):
+                pass
+
+            def transcribe(self, audio_file, **kwargs):
+                # 特意让 Whisper 的“听错”文字和分段方式都和脚本行边界对不上，
+                # 证明对齐只依赖词的位置，不依赖 Whisper 自己的分段或文本。
+                words = [
+                    SimpleNamespace(start=0.0, end=0.3, word="Hxllo"),
+                    SimpleNamespace(start=0.3, end=0.6, word=" thare"),
+                    SimpleNamespace(start=0.6, end=1.0, word=" frend"),
+                    SimpleNamespace(start=1.0, end=1.3, word=" hwo"),
+                    SimpleNamespace(start=1.3, end=1.5, word=" r"),
+                    SimpleNamespace(start=1.5, end=1.8, word=" yu"),
+                    SimpleNamespace(start=1.8, end=2.2, word=" tudai"),
+                ]
+                segment = SimpleNamespace(start=0.0, end=2.2, words=words)
+                info = SimpleNamespace(language="en", language_probability=0.99)
+                return [segment], info
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "generated.srt"
+            with patch.object(subtitle, "model", None), patch.object(
+                subtitle, "WhisperModel", _FakeWhisperModel,
+            ):
+                subtitle.create(
+                    "audio.mp3",
+                    str(subtitle_file),
+                    video_script="hello there friend. how are you today.",
+                )
+
+            items = subtitle.file_to_subtitles(str(subtitle_file))
+
+        self.assertEqual(
+            [item[2] for item in items],
+            ["hello there friend", "how are you today"],
+        )
+        self.assertEqual(items[0][1], "00:00:00,000 --> 00:00:01,000")
+        self.assertEqual(items[1][1], "00:00:01,000 --> 00:00:02,200")
+
+    def test_create_with_video_script_extrapolates_when_whisper_words_run_short(self):
+        """
+        Whisper 识别出的词数少于脚本词数时（例如漏识别、静音检测误判），
+        剩余脚本词按已识别部分的语速连续外推，不能出现 00:00:00,000 占位
+        或时间跳回开头。
+        """
+
+        class _FakeWhisperModel:
+            def __init__(self, **kwargs):
+                pass
+
+            def transcribe(self, audio_file, **kwargs):
+                words = [
+                    SimpleNamespace(start=0.0, end=0.5, word="hello"),
+                    SimpleNamespace(start=0.5, end=1.0, word=" there"),
+                ]
+                segment = SimpleNamespace(start=0.0, end=1.0, words=words)
+                info = SimpleNamespace(language="en", language_probability=0.99)
+                return [segment], info
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "generated.srt"
+            with patch.object(subtitle, "model", None), patch.object(
+                subtitle, "WhisperModel", _FakeWhisperModel,
+            ):
+                subtitle.create(
+                    "audio.mp3",
+                    str(subtitle_file),
+                    video_script="hello there friend. how are you today.",
+                )
+
+            items = subtitle.file_to_subtitles(str(subtitle_file))
+
+        self.assertEqual(
+            [item[2] for item in items],
+            ["hello there friend", "how are you today"],
+        )
+        timestamps = [
+            tuple(
+                utils.time_convert_hmsm_to_seconds(part)
+                for part in item[1].split(" --> ")
+            )
+            for item in items
+        ]
+        for start, end in timestamps:
+            self.assertGreater(end, start)
+        for (_, prev_end), (next_start, _) in zip(timestamps, timestamps[1:]):
+            self.assertGreaterEqual(next_start, prev_end)
+
     def test_correct_ignores_markdown_separator_lines(self):
         """
         Whisper fallback 校正阶段也必须忽略 `---` 这类不可发声脚本行。
