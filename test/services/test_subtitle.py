@@ -236,7 +236,9 @@ class TestSubtitleService(unittest.TestCase):
     def test_correct_replaces_mismatch_and_appends_missing_script_line(self):
         """
         转写结果与脚本完全不一致时仍应以脚本为准；脚本多出的句子没有可复用
-        时间轴时使用明确的零时间占位，避免丢失文本且保持现有兼容行为。
+        时间轴时，按已匹配片段的语速从上一条已知结束时间往后外推，不能再用
+        00:00:00,000 占位——那会让这些字幕堆在片头或干脆不出现，和实际语音
+        完全对不上（真实渲染中发现的问题：约 40% 的字幕因此失去同步）。
         """
         original_srt = "1\n00:00:00,100 --> 00:00:01,000\nWrong text\n\n"
 
@@ -251,7 +253,55 @@ class TestSubtitleService(unittest.TestCase):
             [item[2] for item in items],
             ["Expected sentence", "Extra sentence"],
         )
-        self.assertEqual(items[1][1], "00:00:00,000 --> 00:00:00,000")
+        first_end = utils.time_convert_hmsm_to_seconds(
+            items[0][1].split(" --> ")[1]
+        )
+        second_start, second_end = (
+            utils.time_convert_hmsm_to_seconds(part)
+            for part in items[1][1].split(" --> ")
+        )
+        # 必须紧接着上一条的结束时间往后排，不能跳回 0，也不能是零时长。
+        self.assertEqual(second_start, first_end)
+        self.assertGreater(second_end, second_start)
+
+    def test_correct_never_produces_zero_timestamp_when_whisper_segments_run_short(
+        self,
+    ):
+        """
+        真实渲染中发现的问题复现：按长度切分后的脚本行数（这里 5 行）多于
+        Whisper 实际转写出的片段数（这里 2 个），导致合并逻辑提前耗尽片段。
+        剩余脚本行必须继续获得递增、非零的时间戳，不能全部退化成
+        00:00:00,000 占位。
+        """
+        original_srt = (
+            "1\n00:00:00,000 --> 00:00:01,500\nla ban dang dung cuoc doi cua\n\n"
+            "2\n00:00:01,500 --> 00:00:03,000\nnguoi khac de do gia tri\n\n"
+        )
+        video_script = (
+            "la ban dang dung cuoc doi cua nguoi khac de do gia tri cua "
+            "chinh minh va con nhieu dieu khac nua ma rat it nguoi tung "
+            "duoc nghe qua"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "subtitle.srt"
+            subtitle_file.write_text(original_srt, encoding="utf-8")
+
+            subtitle.correct(str(subtitle_file), video_script, max_line_length=25)
+            items = subtitle.file_to_subtitles(str(subtitle_file))
+
+        self.assertGreater(len(items), 2)
+        timestamps = [
+            tuple(
+                utils.time_convert_hmsm_to_seconds(part)
+                for part in item[1].split(" --> ")
+            )
+            for item in items
+        ]
+        for start, end in timestamps:
+            self.assertGreater(end, start)
+        for (_, prev_end), (next_start, _) in zip(timestamps, timestamps[1:]):
+            self.assertGreaterEqual(next_start, prev_end)
 
     def test_file_to_subtitles_keeps_last_block_without_trailing_newline(self):
         """

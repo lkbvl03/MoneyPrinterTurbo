@@ -212,6 +212,30 @@ def similarity(a, b):
     return 1 - (distance / max_length)
 
 
+# 找不到已匹配片段可参考语速时的保底值：大致的中等语速朗读节奏。
+_DEFAULT_CHARS_PER_SECOND = 12.0
+_MIN_EXTRAPOLATED_DURATION = 0.5
+
+
+def _estimate_chars_per_second(matched_items) -> float:
+    """根据已经成功对齐（含合并/纠正）的字幕片段，估算这段语音的平均语速
+    （字符/秒），用于给耗尽 Whisper 片段后剩余的脚本行外推合理时长。"""
+    total_chars = 0
+    total_seconds = 0.0
+    for item in matched_items:
+        start_str, _, end_str = item[1].partition(" --> ")
+        duration = utils.time_convert_hmsm_to_seconds(
+            end_str
+        ) - utils.time_convert_hmsm_to_seconds(start_str)
+        text = item[2]
+        if duration > 0 and text:
+            total_chars += len(text)
+            total_seconds += duration
+    if total_seconds <= 0 or total_chars <= 0:
+        return _DEFAULT_CHARS_PER_SECOND
+    return total_chars / total_seconds
+
+
 def correct(subtitle_file, video_script, max_line_length: Optional[int] = None):
     subtitle_items = file_to_subtitles(subtitle_file)
     normalized_script = utils.normalize_script_for_subtitle_matching(video_script)
@@ -283,25 +307,50 @@ def correct(subtitle_file, video_script, max_line_length: Optional[int] = None):
             subtitle_index = next_subtitle_index
 
     # Process the remaining lines of the script.
+    # 按长度切分后脚本行数经常多于 Whisper 实际转写出的片段数，导致上面的
+    # 合并逻辑提前耗尽 subtitle_items。此时不能再用 00:00:00,000 占位——
+    # 那会让这些字幕要么全部堆在片头，要么根本不显示，和实际语音完全对不
+    # 上（真实渲染中发现：约 40% 的字幕因此失去同步）。改为按已匹配片段的
+    # 实际语速，从上一条已知结束时间连续往后外推。
+    chars_per_second = None
+    next_start = None
     while script_index < len(script_lines):
-        logger.warning(f"Extra script line: {script_lines[script_index]}")
+        script_line = script_lines[script_index]
+        logger.warning(f"Extra script line: {script_line}")
         if subtitle_index < len(subtitle_items):
             new_subtitle_items.append(
                 (
                     len(new_subtitle_items) + 1,
                     subtitle_items[subtitle_index][1],
-                    script_lines[script_index],
+                    script_line,
                 )
             )
             subtitle_index += 1
         else:
+            if chars_per_second is None:
+                chars_per_second = _estimate_chars_per_second(new_subtitle_items)
+            if next_start is None:
+                next_start = (
+                    utils.time_convert_hmsm_to_seconds(
+                        new_subtitle_items[-1][1].split(" --> ")[1]
+                    )
+                    if new_subtitle_items
+                    else 0.0
+                )
+            duration = max(
+                len(script_line) / chars_per_second, _MIN_EXTRAPOLATED_DURATION
+            )
+            start_seconds = next_start
+            end_seconds = start_seconds + duration
             new_subtitle_items.append(
                 (
                     len(new_subtitle_items) + 1,
-                    "00:00:00,000 --> 00:00:00,000",
-                    script_lines[script_index],
+                    f"{utils.time_convert_seconds_to_hmsm(start_seconds)} --> "
+                    f"{utils.time_convert_seconds_to_hmsm(end_seconds)}",
+                    script_line,
                 )
             )
+            next_start = end_seconds
         script_index += 1
         corrected = True
 

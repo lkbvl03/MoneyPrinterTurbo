@@ -199,6 +199,19 @@ def time_convert_seconds_to_hmsm(seconds) -> str:
     return "{:02d}:{:02d}:{:02d},{:03d}".format(hours, minutes, seconds, milliseconds)
 
 
+def time_convert_hmsm_to_seconds(time_str: str) -> float:
+    """把 "HH:MM:SS,mmm" 格式的 SRT 时间戳解析回秒数，是
+    time_convert_seconds_to_hmsm 的逆运算。"""
+    hms, _, milliseconds = time_str.partition(",")
+    hours, minutes, seconds = hms.split(":")
+    return (
+        int(hours) * 3600
+        + int(minutes) * 60
+        + int(seconds)
+        + (int(milliseconds) / 1000 if milliseconds else 0.0)
+    )
+
+
 def text_to_srt(idx: int, msg: str, start_time: float, end_time: float) -> str:
     start_time = time_convert_seconds_to_hmsm(start_time)
     end_time = time_convert_seconds_to_hmsm(end_time)
