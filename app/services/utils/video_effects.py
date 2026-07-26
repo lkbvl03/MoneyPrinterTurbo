@@ -85,7 +85,14 @@ def _crop_frame(
 ) -> np.ndarray:
     """裁剪 (left, top, right, bottom) 区域并放大回原始画布尺寸。共享给
     zoom（居中裁剪）和 pan（水平偏移裁剪）复用，避免重复实现同一套
-    PIL EXTENT 采样逻辑。"""
+    PIL EXTENT 采样逻辑。
+
+    裁剪边界必须保持浮点精度，不能舍入到整数再使用——连续的缩放或平移
+    变化会导致跨帧在整数边界处跳变，造成边界闪烁。
+
+    采样使用 BILINEAR 而非 BICUBIC/LANCZOS 等更锐利的滤波器——视频需要
+    逐帧连续性，锐利滤波器在高频纹理采样栅格连续变化时会产生光晕和亮度
+    闪烁。"""
     height, width = frame.shape[:2]
     if (
         abs(left) < 1e-9

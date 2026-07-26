@@ -201,8 +201,8 @@ class TestCropFrame(unittest.TestCase):
     def test_cropping_left_half_shifts_content_left(self):
         frame = _detail_frame(width=128, height=96)
         height, width = frame.shape[:2]
-        # crop khung 50% bên trái, phóng to lại full width -> nội dung bên trái
-        # của ảnh gốc phải chiếm toàn bộ ảnh kết quả.
+        # 裁剪左半部分（50%），放大回原始宽度 -> 原始图像左侧的内容必须
+        # 占据整个结果图像。
         cropped = video_effects._crop_frame(frame, 0, 0, width / 2, height)
         np.testing.assert_allclose(
             cropped[:, 0].astype(int), frame[:, 0].astype(int), atol=5
