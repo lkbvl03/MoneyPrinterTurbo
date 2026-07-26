@@ -33,4 +33,8 @@ def apply_overlay_effect(clip: Clip, effect_name: str) -> Clip:
     return spec.generator(clip)
 
 
+from . import _weather
+
+OVERLAY_EFFECTS.update(_weather.CATEGORY_EFFECTS)
+
 # === register category modules below ===
