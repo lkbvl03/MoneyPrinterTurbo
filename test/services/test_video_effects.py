@@ -191,5 +191,34 @@ class TestZoomTransitions(unittest.TestCase):
         )
 
 
+class TestCropFrame(unittest.TestCase):
+    def test_identity_crop_returns_frame_unchanged(self):
+        frame = _detail_frame()
+        height, width = frame.shape[:2]
+        result = video_effects._crop_frame(frame, 0, 0, width, height)
+        np.testing.assert_array_equal(result, frame)
+
+    def test_cropping_left_half_shifts_content_left(self):
+        frame = _detail_frame(width=128, height=96)
+        height, width = frame.shape[:2]
+        # crop khung 50% bên trái, phóng to lại full width -> nội dung bên trái
+        # của ảnh gốc phải chiếm toàn bộ ảnh kết quả.
+        cropped = video_effects._crop_frame(frame, 0, 0, width / 2, height)
+        np.testing.assert_allclose(
+            cropped[:, 0].astype(int), frame[:, 0].astype(int), atol=5
+        )
+
+    def test_zoom_frame_still_matches_previous_center_crop_behavior(self):
+        frame = _detail_frame(width=128, height=96)
+        height, width = frame.shape[:2]
+        zoomed = video_effects._zoom_frame(frame, 1.2)
+        crop_width, crop_height = width / 1.2, height / 1.2
+        left, top = (width - crop_width) / 2, (height - crop_height) / 2
+        expected = video_effects._crop_frame(
+            frame, left, top, left + crop_width, top + crop_height
+        )
+        np.testing.assert_array_equal(zoomed, expected)
+
+
 if __name__ == "__main__":
     unittest.main()

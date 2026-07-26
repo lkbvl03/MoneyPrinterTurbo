@@ -80,18 +80,36 @@ def slideout_transition(clip: Clip, t: float, side: str) -> Clip:
 _ZOOM_MAX_SCALE = 1.2
 
 
-def _zoom_frame(frame: np.ndarray, scale_factor: float) -> np.ndarray:
-    """使用亚像素中心裁剪实现无黑边且稳定的缩放效果。
+def _crop_frame(
+    frame: np.ndarray, left: float, top: float, right: float, bottom: float
+) -> np.ndarray:
+    """裁剪 (left, top, right, bottom) 区域并放大回原始画布尺寸。共享给
+    zoom（居中裁剪）和 pan（水平偏移裁剪）复用，避免重复实现同一套
+    PIL EXTENT 采样逻辑。"""
+    height, width = frame.shape[:2]
+    if (
+        abs(left) < 1e-9
+        and abs(top) < 1e-9
+        and abs(right - width) < 1e-9
+        and abs(bottom - height) < 1e-9
+    ):
+        return frame
 
-    不能先把裁剪宽高转换为整数：缩放比例连续变化时，整数边界会按不同步长跳动，
-    并在奇偶尺寸切换时改变半像素采样相位，最终表现为画面抖动。Pillow 的 EXTENT
-    变换可以直接接收浮点边界，在固定输出画布上完成亚像素采样；左右、上下边界
-    始终围绕同一个浮点中心对称，因此适用于整段视频持续缓慢缩放的场景。
-    """
+    image = Image.fromarray(frame)
+    transformed = image.transform(
+        (width, height),
+        Image.Transform.EXTENT,
+        (left, top, right, bottom),
+        resample=Image.Resampling.BILINEAR,
+    )
+    return np.asarray(transformed)
+
+
+def _zoom_frame(frame: np.ndarray, scale_factor: float) -> np.ndarray:
+    """使用亚像素中心裁剪实现无黑边且稳定的缩放效果，参见 `_crop_frame`。"""
     if scale_factor <= 0:
         raise ValueError("scale_factor must be greater than zero")
 
-    # 1 倍缩放直接返回原帧，避免无意义的重采样造成首帧轻微模糊。
     if abs(scale_factor - 1.0) < 1e-9:
         return frame
 
@@ -100,20 +118,7 @@ def _zoom_frame(frame: np.ndarray, scale_factor: float) -> np.ndarray:
     crop_height = height / scale_factor
     left = (width - crop_width) / 2
     top = (height - crop_height) / 2
-    right = left + crop_width
-    bottom = top + crop_height
-
-    image = Image.fromarray(frame)
-    transformed = image.transform(
-        (width, height),
-        Image.Transform.EXTENT,
-        (left, top, right, bottom),
-        # 视频连续缩放更关注相邻帧的一致性。BICUBIC/LANCZOS 虽然单帧更锐利，
-        # 但高频纹理跨越采样网格时容易出现振铃和亮度闪烁；BILINEAR 更柔和，
-        # 能以少量锐度损失换取更稳定的动态观感。
-        resample=Image.Resampling.BILINEAR,
-    )
-    return np.asarray(transformed)
+    return _crop_frame(frame, left, top, left + crop_width, top + crop_height)
 
 
 def zoomin_transition(clip: Clip, t: float) -> Clip:
