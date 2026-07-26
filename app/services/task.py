@@ -530,11 +530,9 @@ def _resolve_subtitle_max_line_length(params, video_script) -> int:
 
     # 部分调用方（如历史测试里的最小 duck-typed 对象）只保证 subtitle_enabled
     # 和 video_aspect 存在；用 getattr 兜底，缺失时直接回退到固定上限。
-    font_name = getattr(params, "font_name", None) or "STHeitiMedium.ttc"
+    font_name = getattr(params, "font_name", None)
     font_size = getattr(params, "font_size", None) or 60
-    font_path = os.path.join(utils.font_dir(), font_name)
-    if os.name == "nt":
-        font_path = font_path.replace("\\", "/")
+    font_path = video.resolve_font_path(font_name)
     video_width, _ = VideoAspect(params.video_aspect).to_resolution()
     max_width = int(video_width * 0.9)
 
@@ -598,17 +596,18 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
             return ""
 
     if subtitle_provider == "whisper":
+        # create() 在传入 video_script 时，直接按脚本原文的词序位置对齐 Whisper
+        # 逐词时间戳（见 _align_script_lines_to_word_timestamps），写入的每一
+        # 行文本都和 video_script 本身逐字一致。correct() 会用同样的参数重新
+        # 推导一遍 script_lines 再和字幕文件比对——两边永远逐行相同，
+        # correct() 在这条路径上已经不会做任何改动，调用它只是多一次无意义
+        # 的文件读取和比对。真正需要“脚本与转写不一致时如何处理”的地方，
+        # 请直接完善 create()/_align_script_lines_to_word_timestamps 本身。
         subtitle.create(
             audio_file=audio_file,
             subtitle_file=subtitle_path,
             max_line_length=max_line_length,
             video_script=video_script,
-        )
-        logger.info("\n\n## correcting subtitle")
-        subtitle.correct(
-            subtitle_file=subtitle_path,
-            video_script=video_script,
-            max_line_length=max_line_length,
         )
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)

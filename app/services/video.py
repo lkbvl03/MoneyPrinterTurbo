@@ -1046,6 +1046,16 @@ def subtitle_colors_are_indistinguishable(params: VideoParams) -> bool:
     return bool(text_color and text_color == background_color)
 
 
+def resolve_font_path(font_name: Optional[str]) -> str:
+    """把字体文件名解析成 resource/fonts 下的完整路径。Windows 上把反斜杠
+    换成正斜杠，因为字幕渲染和 CLI 参数传递在这个项目里习惯统一用正斜杠
+    路径。font_name 为空时回退到项目默认字体。"""
+    font_path = os.path.join(utils.font_dir(), font_name or "STHeitiMedium.ttc")
+    if os.name == "nt":
+        font_path = font_path.replace("\\", "/")
+    return font_path
+
+
 @lru_cache(maxsize=64)
 def _subtitle_font_supports_sample(font_path: str, sample: str) -> bool:
     """检查字体是否包含样本文字需要的字形，并缓存重复检查结果。"""
@@ -1181,11 +1191,7 @@ def generate_video(
 
     font_path = ""
     if params.subtitle_enabled:
-        if not params.font_name:
-            params.font_name = "STHeitiMedium.ttc"
-        font_path = os.path.join(utils.font_dir(), params.font_name)
-        if os.name == "nt":
-            font_path = font_path.replace("\\", "/")
+        font_path = resolve_font_path(params.font_name)
 
         if subtitle_path and os.path.exists(subtitle_path):
             try:

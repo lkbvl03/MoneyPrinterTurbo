@@ -683,7 +683,6 @@ class TestTaskService(unittest.TestCase):
                 patch.object(
                     tm.subtitle, "create", side_effect=fake_whisper_create
                 ) as create,
-                patch.object(tm.subtitle, "correct") as correct,
                 # 这个测试关心的是 provider 回退编排是否正确调用，不关心具体
                 # 字体的像素测量结果；固定回退到偏好上限，避免与第三方字体
                 # 文件的实际渲染指标耦合。
@@ -705,11 +704,6 @@ class TestTaskService(unittest.TestCase):
             subtitle_file=subtitle_path,
             max_line_length=40,
             video_script="Hello world.",
-        )
-        correct.assert_called_once_with(
-            subtitle_file=subtitle_path,
-            video_script="Hello world.",
-            max_line_length=40,
         )
 
     def test_generate_subtitle_falls_back_to_whisper_for_custom_audio_with_edge_provider(self):
@@ -743,7 +737,6 @@ class TestTaskService(unittest.TestCase):
                 patch.object(
                     tm.subtitle, "create", side_effect=fake_whisper_create
                 ) as whisper_create,
-                patch.object(tm.subtitle, "correct") as whisper_correct,
                 patch.object(tm.voice, "create_subtitle") as create_subtitle,
                 patch.object(tm.video, "max_chars_per_line", return_value=None),
             ):
@@ -760,11 +753,6 @@ class TestTaskService(unittest.TestCase):
         self.assertTrue(subtitle_path.endswith("subtitle.srt"))
         create_subtitle.assert_not_called()
         whisper_create.assert_called_once()
-        whisper_correct.assert_called_once_with(
-            subtitle_file=subtitle_path,
-            video_script="Hello world.",
-            max_line_length=40,
-        )
 
     def test_generate_subtitle_does_not_fallback_to_whisper_when_edge_fails(self):
         """

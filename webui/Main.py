@@ -3179,10 +3179,7 @@ def _render_audio_settings(panel, params):
                 if voice.is_elevenlabs_voice(v):
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
-                if voice.is_chatterbox_voice(v):
-                    name = v.split(":", 1)[1] if ":" in v else v
-                    return name.replace("-Female", "").replace("-Male", "")
-                if voice.is_piper_voice(v):
+                if voice.is_chatterbox_voice(v) or voice.is_piper_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
                     return name.replace("-Female", "").replace("-Male", "")
                 return (

@@ -12,6 +12,7 @@ import threading
 import time
 import unicodedata
 import wave
+from collections import OrderedDict
 from datetime import datetime
 from typing import Optional, Union
 from xml.sax.saxutils import escape, unescape
@@ -387,6 +388,19 @@ def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
     return True
 
 
+def _extract_simple_voice_id(voice_name: str) -> Optional[str]:
+    """Chatterbox / Piper 共用的语音名格式："<provider>:<id>"，id 可能带显示
+    用的 -Female/-Male 后缀。返回去掉前缀和性别后缀后的纯 id；格式不对
+    （缺冒号或冒号后为空）时返回 None。"""
+    parts = voice_name.split(":", 1)
+    if len(parts) < 2 or not parts[1].strip():
+        return None
+    voice_id = parts[1].strip()
+    if voice_id.endswith(("-Female", "-Male")):
+        voice_id = voice_id.rsplit("-", 1)[0]
+    return voice_id
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -464,29 +478,19 @@ def tts(
             logger.error(f"Invalid elevenlabs voice name format: {voice_name}")
             return None
     elif is_chatterbox_voice(voice_name):
-        # 格式: chatterbox:<voice>，voice 可带显示用的 -Female/-Male 后缀
-        parts = voice_name.split(":", 1)
-        if len(parts) >= 2 and parts[1].strip():
-            chatterbox_voice = parts[1].strip()
-            if chatterbox_voice.endswith(("-Female", "-Male")):
-                chatterbox_voice = chatterbox_voice.rsplit("-", 1)[0]
-            return chatterbox_tts(
-                text, chatterbox_voice, voice_file, voice_rate, voice_volume
-            )
-        else:
+        chatterbox_voice = _extract_simple_voice_id(voice_name)
+        if chatterbox_voice is None:
             logger.error(f"Invalid chatterbox voice name format: {voice_name}")
             return None
+        return chatterbox_tts(
+            text, chatterbox_voice, voice_file, voice_rate, voice_volume
+        )
     elif is_piper_voice(voice_name):
-        # 格式: piper:<model>，model 可带显示用的 -Female/-Male 后缀
-        parts = voice_name.split(":", 1)
-        if len(parts) >= 2 and parts[1].strip():
-            piper_voice = parts[1].strip()
-            if piper_voice.endswith(("-Female", "-Male")):
-                piper_voice = piper_voice.rsplit("-", 1)[0]
-            return piper_tts(text, piper_voice, voice_file, voice_rate, voice_volume)
-        else:
+        piper_voice = _extract_simple_voice_id(voice_name)
+        if piper_voice is None:
             logger.error(f"Invalid piper voice name format: {voice_name}")
             return None
+        return piper_tts(text, piper_voice, voice_file, voice_rate, voice_volume)
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
 
@@ -1498,8 +1502,24 @@ def chatterbox_tts(
 _PIPER_PAUSE_PATTERN = re.compile(r"\{\{\s*([0-9]*\.?[0-9]+)\s*\}\}")
 # PiperVoice.load() 需要先把 .onnx 模型读进内存（通常几十到上百 MB），按模型
 # 路径缓存，避免同一次 CLI 调用里多次合成（例如脚本里有多个 {{暂停}} 分段）
-# 时反复重新加载同一个模型。
-_piper_voice_cache: dict = {}
+# 时反复重新加载同一个模型。长驻进程（webui/API）里用过的语音可能不止一个，
+# 用 OrderedDict 做简单 LRU，最多同时保留几个模型在内存里，而不是无限增长。
+_PIPER_VOICE_CACHE_MAX_SIZE = 3
+_piper_voice_cache: "OrderedDict[str, object]" = OrderedDict()
+
+
+def _get_cached_piper_voice(model_path: str, piper_voice_cls) -> object:
+    cached = _piper_voice_cache.get(model_path)
+    if cached is not None:
+        _piper_voice_cache.move_to_end(model_path)
+        return cached
+
+    logger.info(f"loading piper model: {model_path}")
+    loaded = piper_voice_cls.load(model_path)
+    _piper_voice_cache[model_path] = loaded
+    if len(_piper_voice_cache) > _PIPER_VOICE_CACHE_MAX_SIZE:
+        _piper_voice_cache.popitem(last=False)
+    return loaded
 
 
 def split_text_with_pauses(raw_text: str) -> list[tuple[str, object]]:
@@ -1583,11 +1603,7 @@ def piper_tts(
         return None
 
     try:
-        piper_voice = _piper_voice_cache.get(model_path)
-        if piper_voice is None:
-            logger.info(f"loading piper model: {model_path}")
-            piper_voice = PiperVoice.load(model_path)
-            _piper_voice_cache[model_path] = piper_voice
+        piper_voice = _get_cached_piper_voice(model_path, PiperVoice)
 
         # MPT 的 voice_rate 语义是 edge-tts 风格：>1.0 更快。Piper 的
         # length_scale 正好相反（数值越大越慢），需要取倒数换算。

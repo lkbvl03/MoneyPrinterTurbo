@@ -6,6 +6,7 @@ import unittest
 import sys
 import tempfile
 import time
+from collections import OrderedDict
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -893,6 +894,43 @@ class TestVoiceService(unittest.TestCase):
         ), patch.dict(sys.modules, {"piper": None}):
             result = vs.piper_tts(text="hi", voice="v", voice_file="unused.wav")
         self.assertIsNone(result)
+
+    def test_piper_voice_cache_evicts_least_recently_used_beyond_max_size(self):
+        """
+        长驻进程里用过的 Piper 语音不止一个时，缓存不能无限增长（每个模型
+        可能几十到上百 MB）。用到超过上限的第 4 个语音后，最早且最久未使用
+        的那个应该被换出，需要重新加载。
+        """
+        load_calls, synth_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for name in ["a", "b", "c", "d"]:
+                Path(tmp_dir, f"{name}.onnx").write_bytes(b"fake-onnx")
+            voice_file = str(Path(tmp_dir) / "out.wav")
+
+            with patch.object(
+                vs.config, "piper", {"models_dir": tmp_dir}
+            ), self._install_fake_piper_module(
+                load_calls, synth_calls
+            ), patch.object(
+                # _piper_voice_cache is process-global; isolate this test
+                # from whatever other piper tests already cached, otherwise
+                # eviction timing depends on test execution order.
+                vs,
+                "_piper_voice_cache",
+                OrderedDict(),
+            ):
+                for name in ["a", "b", "c", "d"]:
+                    vs.piper_tts(
+                        text="hi", voice=name, voice_file=voice_file, voice_rate=1.0
+                    )
+                # "a" was evicted (cache max size is 3) once "d" loaded --
+                # using it again must trigger a second real load.
+                vs.piper_tts(
+                    text="hi", voice="a", voice_file=voice_file, voice_rate=1.0
+                )
+
+        model_paths = [str(Path(tmp_dir) / f"{n}.onnx") for n in ["a", "b", "c", "d"]]
+        self.assertEqual(load_calls, model_paths + [model_paths[0]])
 
     def test_generate_subtitle_keeps_edge_provider_for_gemini_legacy_submaker(self):
         """
