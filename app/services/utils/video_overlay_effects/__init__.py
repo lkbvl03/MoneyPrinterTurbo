@@ -37,4 +37,8 @@ from . import _weather
 
 OVERLAY_EFFECTS.update(_weather.CATEGORY_EFFECTS)
 
+from . import _atmosphere
+
+OVERLAY_EFFECTS.update(_atmosphere.CATEGORY_EFFECTS)
+
 # === register category modules below ===
