@@ -64,9 +64,8 @@ def _make_transform_effect(
 
 
 # ---------------------------------------------------------------------------
-# Particle field: dùng chung cho mưa/tuyết/bụi/tàn lửa/tro/đom đóm/bokeh/xước phim.
-# Blit từng "stamp" nhỏ (không quét toàn khung hình cho mỗi hạt) để hiệu năng
-# không phụ thuộc độ phân giải video — quan trọng vì clip có thể lên tới 1080x1920.
+# 粒子场共用：雨/雪/灰尘/火星/灰烬/萤火虫/虚焦/胶片划痕。
+# 逐个 Blit 小 'stamp'（不扫描整帧）让性能不依赖分辨率——这很重要，因为素材可能达到 1080x1920。
 # ---------------------------------------------------------------------------
 
 
@@ -179,8 +178,7 @@ def _particle_field_layer(
 
 
 # ---------------------------------------------------------------------------
-# Scrolling value-noise: dùng cho sương mù/khói — không thêm dependency ngoài,
-# tự tạo lưới ngẫu nhiên độ phân giải thấp rồi phóng to bằng PIL bilinear.
+# 滚动值噪声：用于雾/烟。不增加外部依赖，自生成低分辨率随机网格，用 PIL 双线性插值放大。
 # ---------------------------------------------------------------------------
 
 
@@ -237,7 +235,7 @@ def _noise_field_layer(
 
 
 # ---------------------------------------------------------------------------
-# Radial glow: một quầng sáng tròn mềm, dùng cho lửa/ánh sáng/năng lượng.
+# 径向辉光：柔和的圆形辉光，用于火焰/光线/能量。
 # ---------------------------------------------------------------------------
 
 
