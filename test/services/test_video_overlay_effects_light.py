@@ -61,9 +61,26 @@ class TestLensFlareSweep(unittest.TestCase):
         self.addCleanup(clip.close)
         result = apply_overlay_effect(clip, "lens_flare_sweep")
         self.addCleanup(result.close)
+
+        # Get frames at start and halfway through the period (5.0s)
+        # Formula: cx = width * progress where progress = (t % period) / period
+        # At t=0.0: progress=0, cx=0 (left edge)
+        # At t=2.5: progress=0.5, cx=width/2 (center)
         frame_a = result.get_frame(0.0)
         frame_b = result.get_frame(2.5)
-        self.assertFalse(np.array_equal(frame_a, frame_b))
+
+        # Find the brightest column index in each frame by summing brightness
+        # across all rows and channels for each column, then finding the argmax.
+        brightness_per_column_a = frame_a.sum(axis=(0, 2))
+        brightness_per_column_b = frame_b.sum(axis=(0, 2))
+
+        brightest_col_a = np.argmax(brightness_per_column_a)
+        brightest_col_b = np.argmax(brightness_per_column_b)
+
+        # The spot should move right (increasing column index) as time increases within the period
+        self.assertGreater(brightest_col_b, brightest_col_a,
+                          f"Lens flare should move right: brightest column at t=0.0 was {brightest_col_a}, "
+                          f"at t=2.5 was {brightest_col_b}")
 
 
 if __name__ == "__main__":
