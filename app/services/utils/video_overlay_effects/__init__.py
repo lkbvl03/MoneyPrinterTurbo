@@ -45,4 +45,8 @@ from . import _fire
 
 OVERLAY_EFFECTS.update(_fire.CATEGORY_EFFECTS)
 
+from . import _light
+
+OVERLAY_EFFECTS.update(_light.CATEGORY_EFFECTS)
+
 # === register category modules below ===
