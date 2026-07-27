@@ -53,4 +53,6 @@ from . import _retro
 
 OVERLAY_EFFECTS.update(_retro.CATEGORY_EFFECTS)
 
-# === register category modules below ===
+from . import _camera
+
+OVERLAY_EFFECTS.update(_camera.CATEGORY_EFFECTS)
