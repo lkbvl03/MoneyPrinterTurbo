@@ -696,6 +696,7 @@ def generate_final_videos(
             video_concat_mode=video_concat_mode,
             video_transition_mode=video_transition_mode,
             video_transition_style=params.video_transition_style,
+            video_overlay_effect=params.video_overlay_effect,
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
             clip_speed=params.video_clip_speed,
