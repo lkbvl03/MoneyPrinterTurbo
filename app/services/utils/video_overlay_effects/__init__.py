@@ -49,4 +49,8 @@ from . import _light
 
 OVERLAY_EFFECTS.update(_light.CATEGORY_EFFECTS)
 
+from . import _retro
+
+OVERLAY_EFFECTS.update(_retro.CATEGORY_EFFECTS)
+
 # === register category modules below ===
