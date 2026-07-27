@@ -40,6 +40,26 @@ class TestVideoParams(unittest.TestCase):
                 video_transition_style="not-a-real-transition",
             )
 
+    def test_video_overlay_effect_defaults_to_none(self):
+        params = VideoParams(video_subject="test")
+        self.assertIsNone(params.video_overlay_effect)
+
+    def test_video_overlay_effect_accepts_a_catalog_name(self):
+        params = VideoParams(video_subject="test", video_overlay_effect="rain_light")
+        self.assertEqual(params.video_overlay_effect, "rain_light")
+
+    def test_video_overlay_effect_accepts_random(self):
+        params = VideoParams(video_subject="test", video_overlay_effect="random")
+        self.assertEqual(params.video_overlay_effect, "random")
+
+    def test_video_overlay_effect_accepts_none_string(self):
+        params = VideoParams(video_subject="test", video_overlay_effect="none")
+        self.assertEqual(params.video_overlay_effect, "none")
+
+    def test_video_overlay_effect_rejects_unknown_name(self):
+        with self.assertRaises(pydantic.ValidationError):
+            VideoParams(video_subject="test", video_overlay_effect="not-a-real-effect")
+
 
 if __name__ == "__main__":
     unittest.main()

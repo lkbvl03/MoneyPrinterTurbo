@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config import config
 from app.services.utils.xfade_transitions import XFADE_TRANSITIONS
+from app.services.utils.video_overlay_effects import OVERLAY_EFFECTS
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -80,6 +81,7 @@ class VideoParams(BaseModel):
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
     video_transition_style: Optional[str] = None
+    video_overlay_effect: Optional[str] = None
     video_clip_duration: Optional[int] = 7
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
@@ -133,6 +135,18 @@ class VideoParams(BaseModel):
             raise ValueError(
                 f"video_transition_style must be one of: {allowed}"
             )
+        return value
+
+    @field_validator("video_overlay_effect")
+    @classmethod
+    def _validate_video_overlay_effect(cls, value: Optional[str]) -> Optional[str]:
+        # 与 video_transition_style 同样的道理：HTTP API 绕过 CLI 层的校验，
+        # 必须在 schema 层再校验一次，避免非法字符串传入 combine_videos。
+        if value is None or value in ("none", "random"):
+            return value
+        if value not in OVERLAY_EFFECTS:
+            allowed = ", ".join(("none", "random", *sorted(OVERLAY_EFFECTS)))
+            raise ValueError(f"video_overlay_effect must be one of: {allowed}")
         return value
 
 
