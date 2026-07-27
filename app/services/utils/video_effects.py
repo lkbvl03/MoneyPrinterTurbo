@@ -155,3 +155,45 @@ def zoomout_transition(clip: Clip, t: float) -> Clip:
         return _zoom_frame(get_frame(current_time), scale_factor)
 
     return clip.transform(scale_effect)
+
+
+# 需要放大出可平移的余量，否则镜头平移到边缘会露出画面外的空白区域。
+_PAN_ZOOM_FACTOR = 1.15
+
+
+def pan_left_transition(clip: Clip, t: float) -> Clip:
+    """镜头在整个片段内从右向左缓慢横移，裁切窗口固定为 1/1.15 宽度。"""
+    _ = t
+    duration = max(clip.duration, 0.001)
+
+    def pan_effect(get_frame, current_time: float):
+        frame = get_frame(current_time)
+        height, width = frame.shape[:2]
+        crop_width = width / _PAN_ZOOM_FACTOR
+        crop_height = height / _PAN_ZOOM_FACTOR
+        max_left = width - crop_width
+        progress = min(max(current_time / duration, 0), 1)
+        left = max_left * (1.0 - progress)
+        top = (height - crop_height) / 2
+        return _crop_frame(frame, left, top, left + crop_width, top + crop_height)
+
+    return clip.transform(pan_effect)
+
+
+def pan_right_transition(clip: Clip, t: float) -> Clip:
+    """与 pan_left_transition 对称，裁切窗口从左向右移动。"""
+    _ = t
+    duration = max(clip.duration, 0.001)
+
+    def pan_effect(get_frame, current_time: float):
+        frame = get_frame(current_time)
+        height, width = frame.shape[:2]
+        crop_width = width / _PAN_ZOOM_FACTOR
+        crop_height = height / _PAN_ZOOM_FACTOR
+        max_left = width - crop_width
+        progress = min(max(current_time / duration, 0), 1)
+        left = max_left * progress
+        top = (height - crop_height) / 2
+        return _crop_frame(frame, left, top, left + crop_width, top + crop_height)
+
+    return clip.transform(pan_effect)

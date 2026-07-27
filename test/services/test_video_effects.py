@@ -35,6 +35,11 @@ def _detail_frame(width=128, height=96):
     ).astype(np.uint8)
 
 
+def _detail_frame_clip(width=128, height=96, duration=1.0):
+    """创建包含高频细节的短片，用于测试平移转场的连续响应。"""
+    return ImageClip(_detail_frame(width, height)).with_duration(duration)
+
+
 class TestFadeAndSlideTransitions(unittest.TestCase):
     def test_fade_transitions_apply_requested_duration(self):
         """淡入淡出必须把调用方传入的时长原样交给 MoviePy effect。"""
@@ -218,6 +223,38 @@ class TestCropFrame(unittest.TestCase):
             frame, left, top, left + crop_width, top + crop_height
         )
         np.testing.assert_array_equal(zoomed, expected)
+
+
+class TestPanTransitions(unittest.TestCase):
+    def test_pan_left_keeps_duration_and_size(self):
+        clip = _gradient_clip(width=120, height=90, duration=2.0)
+        self.addCleanup(clip.close)
+        result = video_effects.pan_left_transition(clip, 1)
+        self.addCleanup(result.close)
+        self.assertEqual(result.duration, clip.duration)
+        self.assertEqual(result.size, clip.size)
+
+    def test_pan_left_moves_viewport_from_right_to_left(self):
+        clip = _detail_frame_clip(width=120, height=90, duration=2.0)
+        self.addCleanup(clip.close)
+        result = video_effects.pan_left_transition(clip, 1)
+        self.addCleanup(result.close)
+        start_frame = result.get_frame(0.0)
+        end_frame = result.get_frame(1.999)
+        self.assertFalse(np.array_equal(start_frame, end_frame))
+
+    def test_pan_right_is_the_horizontal_mirror_of_pan_left_progress(self):
+        clip = _detail_frame_clip(width=120, height=90, duration=2.0)
+        self.addCleanup(clip.close)
+        left_result = video_effects.pan_left_transition(clip, 1)
+        right_result = video_effects.pan_right_transition(clip, 1)
+        self.addCleanup(left_result.close)
+        self.addCleanup(right_result.close)
+        # 在短片开头，pan_left 站在源框架的右边缘，而 pan_right 站在
+        # 左边缘，所以两个首帧应该存在明显差异。
+        self.assertFalse(
+            np.array_equal(left_result.get_frame(0.0), right_result.get_frame(0.0))
+        )
 
 
 if __name__ == "__main__":
