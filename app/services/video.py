@@ -37,6 +37,7 @@ from app.models.schema import (
 from app.services import bgm as bgm_service
 from app.services.utils import video_effects
 from app.services.utils import xfade_transitions
+from app.services.utils import video_overlay_effects
 from app.utils import file_security, utils
 
 class SubClippedVideoClip:
@@ -616,6 +617,7 @@ def combine_videos(
     video_concat_mode: VideoConcatMode = VideoConcatMode.random,
     video_transition_mode: VideoTransitionMode = None,
     video_transition_style: Optional[str] = None,
+    video_overlay_effect: Optional[str] = None,
     max_clip_duration: int = 7,
     threads: int = 2,
     clip_speed: float = 1.0,
@@ -764,6 +766,17 @@ def combine_videos(
                     ]
                     shuffle_transition = random.choice(transition_funcs)
                     clip = shuffle_transition(clip)
+
+            # 镜头特效（雨/雪/烟/火/闪电/胶片颗粒/推拉横移...）与转场是两套独立
+            # 机制：转场决定片段之间如何切换，这里决定单个片段播放期间叠加什么
+            # 视觉效果。必须在写入临时文件之前完成，这样后续无论走 xfade 拼接
+            # 还是普通 ffmpeg concat，效果都已经烧录进片段本身。
+            if video_overlay_effect:
+                resolved_effect = video_overlay_effects.resolve_overlay_effect_name(
+                    video_overlay_effect
+                )
+                if resolved_effect:
+                    clip = video_overlay_effects.apply_overlay_effect(clip, resolved_effect)
 
             if clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)

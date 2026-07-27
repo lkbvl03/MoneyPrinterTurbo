@@ -1322,5 +1322,79 @@ class TestCombineVideosXfadeIntegration(unittest.TestCase):
         self.assertGreaterEqual(effective_duration, required_video_duration)
 
 
+class TestCombineVideosOverlayEffect(unittest.TestCase):
+    def _run_combine_with_overlay(self, *, video_overlay_effect):
+        applied_effect_names = []
+
+        class _FakeAudioClip:
+            duration = 6.0
+
+            def close(self):
+                pass
+
+        class _FakeVideoClip:
+            def __init__(self, duration=2.0):
+                self.duration = duration
+                self.size = (1080, 1920)
+                self.w, self.h = 1080, 1920
+
+            def subclipped(self, start_time, end_time):
+                return _FakeVideoClip(end_time - start_time)
+
+            def with_speed_scaled(self, factor):
+                return self
+
+            def close(self):
+                pass
+
+        def _fake_apply_overlay_effect(clip, effect_name):
+            applied_effect_names.append(effect_name)
+            return clip
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            with (
+                patch.object(vd, "AudioFileClip", return_value=_FakeAudioClip()),
+                patch.object(
+                    vd, "_open_video_clip_quietly", return_value=_FakeVideoClip()
+                ),
+                patch.object(vd, "_write_videofile_with_codec_fallback"),
+                patch.object(
+                    vd,
+                    "_prioritize_unique_source_clips",
+                    side_effect=lambda subclipped_items, concat_mode: subclipped_items,
+                ),
+                patch.object(vd, "concat_video_clips_with_ffmpeg"),
+                patch.object(vd, "delete_files"),
+                patch.object(
+                    vd.video_overlay_effects,
+                    "apply_overlay_effect",
+                    side_effect=_fake_apply_overlay_effect,
+                ),
+            ):
+                vd.combine_videos(
+                    combined_video_path=combined_video_path,
+                    video_paths=["clip.mp4"],
+                    audio_file="audio.mp3",
+                    max_clip_duration=3,
+                    video_overlay_effect=video_overlay_effect,
+                )
+
+        return applied_effect_names
+
+    def test_no_overlay_effect_by_default(self):
+        applied = self._run_combine_with_overlay(video_overlay_effect=None)
+        self.assertEqual(applied, [])
+
+    def test_fixed_overlay_effect_is_applied_to_every_processed_clip(self):
+        applied = self._run_combine_with_overlay(video_overlay_effect="rain_light")
+        self.assertTrue(applied)
+        self.assertTrue(all(name == "rain_light" for name in applied))
+
+    def test_none_string_does_not_apply_any_effect(self):
+        applied = self._run_combine_with_overlay(video_overlay_effect="none")
+        self.assertEqual(applied, [])
+
+
 if __name__ == "__main__":
     unittest.main()
