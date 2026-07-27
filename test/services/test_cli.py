@@ -635,6 +635,32 @@ class TestCli(unittest.TestCase):
             )
         self.assertEqual(cm.exception.code, 2)
 
+    def test_video_overlay_effect_accepts_a_valid_name(self):
+        args = cli.parse_args(
+            ["--video-subject", "测试主题", "--video-overlay-effect", "rain_light"]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.video_overlay_effect, "rain_light")
+
+    def test_video_overlay_effect_accepts_random(self):
+        args = cli.parse_args(
+            ["--video-subject", "测试主题", "--video-overlay-effect", "random"]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.video_overlay_effect, "random")
+
+    def test_video_overlay_effect_defaults_to_none(self):
+        args = cli.parse_args(["--video-subject", "测试主题"])
+        params = cli.build_video_params(args)
+        self.assertIsNone(params.video_overlay_effect)
+
+    def test_video_overlay_effect_rejects_unknown_name(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args(
+                ["--video-subject", "测试主题", "--video-overlay-effect", "not-a-real-effect"]
+            )
+        self.assertEqual(cm.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

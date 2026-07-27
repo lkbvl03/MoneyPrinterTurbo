@@ -145,6 +145,19 @@ def _transition_style(value: str) -> str:
     return normalized
 
 
+def _overlay_effect(value: str) -> str:
+    from app.services.utils.video_overlay_effects import OVERLAY_EFFECTS
+
+    normalized = value.strip()
+    choices = ("none", "random", *OVERLAY_EFFECTS)
+    if normalized not in choices:
+        allowed = ", ".join(choices)
+        raise argparse.ArgumentTypeError(
+            f"video-overlay-effect must be one of: {allowed}"
+        )
+    return normalized
+
+
 def _bgm_type(value: str) -> str:
     normalized = value.strip().lower()
     if normalized == "none":
@@ -296,6 +309,17 @@ Output and exit status:
         help=(
             "professional ffmpeg xfade transition between source clips, "
             "independent of --video-transition-mode (default: none)"
+        ),
+    )
+    video_group.add_argument(
+        "--video-overlay-effect",
+        type=_overlay_effect,
+        default=None,
+        metavar="{none,random,<38 cinematic overlay effect names>}",
+        help=(
+            "cinematic visual effect applied per source clip (rain, snow, fire, "
+            "lightning, film grain, camera pan/zoom, ...), independent of "
+            "--video-transition-style (default: none)"
         ),
     )
     video_group.add_argument(
@@ -578,6 +602,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_concat_mode",
         "video_transition_mode",
         "video_transition_style",
+        "video_overlay_effect",
         "video_clip_duration",
         "match_materials_to_script",
         "n_threads",
