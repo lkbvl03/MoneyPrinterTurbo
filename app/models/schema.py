@@ -1,3 +1,4 @@
+import json
 import warnings
 from enum import Enum
 from typing import Any, List, Literal, Optional, Union
@@ -83,6 +84,7 @@ class VideoParams(BaseModel):
     video_transition_style: Optional[str] = None
     video_overlay_effect: Optional[str] = None
     video_clip_duration: Optional[int] = 7
+    card_text_config: Optional[str] = None
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
     video_count: Optional[int] = 1
@@ -147,6 +149,77 @@ class VideoParams(BaseModel):
         if value not in OVERLAY_EFFECTS:
             allowed = ", ".join(("none", "random", *sorted(OVERLAY_EFFECTS)))
             raise ValueError(f"video_overlay_effect must be one of: {allowed}")
+        return value
+
+    @field_validator("card_text_config")
+    @classmethod
+    def _validate_card_text_config(cls, value: Optional[str]) -> Optional[str]:
+        # card_text_config 是 JSON 字符串（不是嵌套的 pydantic 模型），因为
+        # ContentStudio 和 cli.py 两端都是直接拼接/传递原始 JSON 文本，不需要
+        # 额外一层 Python 对象转换。这里只做结构和取值合法性校验，校验通过后
+        # 原样返回，不做任何规范化改写。
+        if value is None or value == "":
+            return None
+
+        # 延迟到函数内部导入：card_text 包（经由 _styles.py）在模块级会 import
+        # app.services.video，而 video.py 又反过来在模块级 import 本文件
+        # （app.models.schema）以获取 VideoParams 等类型，如果把这两个 import
+        # 放在文件顶部会形成循环导入（schema -> card_text -> video -> schema），
+        # 导致整个模块加载失败。放到这里按需导入可以避免该循环。
+        from app.services.utils.card_text import CARD_EFFECTS, CARD_STYLES
+        from app.services.utils.card_text._sounds import CARD_SOUNDS
+
+        try:
+            slots = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"card_text_config must be valid JSON: {exc}") from exc
+
+        if not isinstance(slots, list):
+            raise ValueError("card_text_config must be a JSON array of slot objects")
+
+        allowed_styles = set(CARD_STYLES) | {"random"}
+        allowed_effects = set(CARD_EFFECTS) | {"random"}
+        allowed_sounds = set(CARD_SOUNDS) | {"auto", "none"}
+        seen_slots = set()
+
+        for entry in slots:
+            if not isinstance(entry, dict):
+                raise ValueError("each card_text_config entry must be a JSON object")
+
+            missing = {"slot", "style", "effect"} - entry.keys()
+            if missing:
+                raise ValueError(
+                    f"card_text_config entry is missing required keys: {sorted(missing)}"
+                )
+
+            slot = entry["slot"]
+            if not isinstance(slot, int) or slot < 1:
+                raise ValueError("card_text_config 'slot' must be a positive integer")
+            if slot in seen_slots:
+                raise ValueError(f"card_text_config has duplicate slot number: {slot}")
+            seen_slots.add(slot)
+
+            style = entry["style"]
+            if style not in allowed_styles:
+                raise ValueError(
+                    f"card_text_config 'style' must be one of: "
+                    f"{', '.join(sorted(allowed_styles))}"
+                )
+
+            effect = entry["effect"]
+            if effect not in allowed_effects:
+                raise ValueError(
+                    f"card_text_config 'effect' must be one of: "
+                    f"{', '.join(sorted(allowed_effects))}"
+                )
+
+            sound = entry.get("sound", "auto")
+            if sound not in allowed_sounds:
+                raise ValueError(
+                    f"card_text_config 'sound' must be one of: "
+                    f"{', '.join(sorted(allowed_sounds))}"
+                )
+
         return value
 
 

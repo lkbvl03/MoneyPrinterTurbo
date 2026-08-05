@@ -61,5 +61,89 @@ class TestVideoParams(unittest.TestCase):
             VideoParams(video_subject="test", video_overlay_effect="not-a-real-effect")
 
 
+def _make_params(**overrides):
+    return VideoParams(video_subject="test", **overrides)
+
+
+class TestCardTextConfigValidation(unittest.TestCase):
+    def test_none_is_accepted_and_left_as_none(self):
+        params = _make_params(card_text_config=None)
+        self.assertIsNone(params.card_text_config)
+
+    def test_empty_string_is_accepted_and_normalized_to_none(self):
+        params = _make_params(card_text_config="")
+        self.assertIsNone(params.card_text_config)
+
+    def test_valid_single_slot_config_is_kept_unchanged(self):
+        raw = '[{"slot": 1, "style": "minimal_white", "effect": "slide_left", "sound": "auto"}]'
+        params = _make_params(card_text_config=raw)
+        self.assertEqual(params.card_text_config, raw)
+
+    def test_sound_field_is_optional_per_slot(self):
+        raw = '[{"slot": 1, "style": "minimal_white", "effect": "slide_left"}]'
+        params = _make_params(card_text_config=raw)
+        self.assertEqual(params.card_text_config, raw)
+
+    def test_random_is_accepted_for_style_and_effect(self):
+        raw = '[{"slot": 1, "style": "random", "effect": "random"}]'
+        params = _make_params(card_text_config=raw)
+        self.assertEqual(params.card_text_config, raw)
+
+    def test_multiple_slots_are_accepted(self):
+        raw = (
+            '[{"slot": 1, "style": "minimal_white", "effect": "slide_left"},'
+            ' {"slot": 2, "style": "bold_yellow_box", "effect": "bounce", "sound": "none"}]'
+        )
+        params = _make_params(card_text_config=raw)
+        self.assertEqual(params.card_text_config, raw)
+
+    def test_malformed_json_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(card_text_config="not json")
+
+    def test_non_list_json_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(card_text_config='{"slot": 1}')
+
+    def test_missing_required_key_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(card_text_config='[{"slot": 1, "style": "minimal_white"}]')
+
+    def test_unknown_style_name_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(
+                card_text_config='[{"slot": 1, "style": "nonexistent", "effect": "slide_left"}]'
+            )
+
+    def test_unknown_effect_name_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(
+                card_text_config='[{"slot": 1, "style": "minimal_white", "effect": "nonexistent"}]'
+            )
+
+    def test_unknown_sound_name_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(
+                card_text_config=(
+                    '[{"slot": 1, "style": "minimal_white", "effect": "slide_left",'
+                    ' "sound": "nonexistent"}]'
+                )
+            )
+
+    def test_non_positive_slot_number_is_rejected(self):
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(
+                card_text_config='[{"slot": 0, "style": "minimal_white", "effect": "slide_left"}]'
+            )
+
+    def test_duplicate_slot_numbers_are_rejected(self):
+        raw = (
+            '[{"slot": 1, "style": "minimal_white", "effect": "slide_left"},'
+            ' {"slot": 1, "style": "bold_yellow_box", "effect": "bounce"}]'
+        )
+        with self.assertRaises(pydantic.ValidationError):
+            _make_params(card_text_config=raw)
+
+
 if __name__ == "__main__":
     unittest.main()
