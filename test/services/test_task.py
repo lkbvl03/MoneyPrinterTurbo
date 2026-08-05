@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from app.services import task as tm
 from app.models.schema import MaterialInfo, VideoParams
 from app.services.state import MemoryState, RedisState
+from app.services.utils.card_markers import CardMarker
 from app.utils import utils
 
 resources_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources")
@@ -692,7 +693,11 @@ class TestTaskService(unittest.TestCase):
         )
 
         def fake_whisper_create(
-            audio_file, subtitle_file, max_line_length=None, video_script=""
+            audio_file,
+            subtitle_file,
+            max_line_length=None,
+            video_script="",
+            card_markers=None,
         ):
             Path(subtitle_file).write_text(
                 "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n",
@@ -714,7 +719,7 @@ class TestTaskService(unittest.TestCase):
                 # 文件的实际渲染指标耦合。
                 patch.object(tm.video, "max_chars_per_line", return_value=None),
             ):
-                subtitle_path = tm.generate_subtitle(
+                subtitle_path, _card_timings = tm.generate_subtitle(
                     task_id=task_id,
                     params=params,
                     video_script="Hello world.",
@@ -730,6 +735,7 @@ class TestTaskService(unittest.TestCase):
             subtitle_file=subtitle_path,
             max_line_length=40,
             video_script="Hello world.",
+            card_markers=None,
         )
 
     def test_generate_subtitle_falls_back_to_whisper_for_custom_audio_with_edge_provider(self):
@@ -766,7 +772,7 @@ class TestTaskService(unittest.TestCase):
                 patch.object(tm.voice, "create_subtitle") as create_subtitle,
                 patch.object(tm.video, "max_chars_per_line", return_value=None),
             ):
-                subtitle_path = tm.generate_subtitle(
+                subtitle_path, _card_timings = tm.generate_subtitle(
                     task_id=task_id,
                     params=params,
                     video_script="Hello world.",
@@ -807,7 +813,7 @@ class TestTaskService(unittest.TestCase):
                 patch.object(tm.subtitle, "create") as whisper_create,
                 patch.object(tm.subtitle, "correct") as whisper_correct,
             ):
-                subtitle_path = tm.generate_subtitle(
+                subtitle_path, _card_timings = tm.generate_subtitle(
                     task_id=task_id,
                     params=params,
                     video_script="Hello world.",
@@ -821,6 +827,123 @@ class TestTaskService(unittest.TestCase):
         create_subtitle.assert_called_once()
         whisper_create.assert_not_called()
         whisper_correct.assert_not_called()
+
+    def test_generate_subtitle_forces_whisper_when_card_markers_present(self):
+        """
+        脚本里有 [card N: ...] 标记时必须强制走 Whisper 才能获得逐词时间戳，
+        即使运行环境配置的默认 provider 是 edge，且有可用的 TTS sub_maker。
+        """
+        task_id = "test-card-markers-force-whisper"
+        task_dir = utils.task_dir(task_id)
+        audio_file = os.path.join(task_dir, "audio.mp3")
+        Path(audio_file).write_bytes(b"fake audio")
+        params = VideoParams(
+            video_subject="card markers",
+            video_script="Hello world.",
+            subtitle_enabled=True,
+        )
+        markers = [CardMarker(slot=1, text="Wow!", anchor_word_index=1)]
+
+        def fake_whisper_create(
+            audio_file,
+            subtitle_file,
+            max_line_length=None,
+            video_script="",
+            card_markers=None,
+        ):
+            Path(subtitle_file).write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n",
+                encoding="utf-8",
+            )
+            return [tm.subtitle.ResolvedCardTiming(slot=1, text="Wow!", start_time=0.5)]
+
+        try:
+            with (
+                patch.object(
+                    tm.config,
+                    "app",
+                    dict(tm.config.app, subtitle_provider="edge"),
+                ),
+                patch.object(tm.voice, "create_subtitle") as create_subtitle,
+                patch.object(
+                    tm.subtitle, "create", side_effect=fake_whisper_create
+                ) as whisper_create,
+                patch.object(tm.video, "max_chars_per_line", return_value=None),
+            ):
+                subtitle_path, card_timings = tm.generate_subtitle(
+                    task_id=task_id,
+                    params=params,
+                    video_script="Hello world.",
+                    sub_maker=object(),
+                    audio_file=audio_file,
+                    card_markers=markers,
+                )
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+        create_subtitle.assert_not_called()
+        whisper_create.assert_called_once()
+        self.assertEqual(whisper_create.call_args.kwargs["card_markers"], markers)
+        self.assertEqual(len(card_timings), 1)
+        self.assertEqual(card_timings[0].slot, 1)
+        self.assertEqual(card_timings[0].start_time, 0.5)
+
+    def test_generate_subtitle_returns_empty_card_timings_when_disabled(self):
+        """字幕功能关闭时卡片文字标记必须被静默忽略（规格明确要求），
+        不能抛异常或返回 None 导致上层解包失败。"""
+        params = VideoParams(
+            video_subject="disabled", video_script="Hello.", subtitle_enabled=False
+        )
+        result = tm.generate_subtitle(
+            task_id="test-subtitle-disabled",
+            params=params,
+            video_script="Hello.",
+            sub_maker=None,
+            audio_file="audio.mp3",
+            card_markers=[CardMarker(slot=1, text="X", anchor_word_index=0)],
+        )
+        self.assertEqual(result, ("", []))
+
+    def test_start_extracts_card_markers_and_strips_them_before_downstream_stages(self):
+        """
+        [card N: ...] 标记必须在脚本生成后立刻提取干净，不能带着标记原文继续
+        往下传给分词、配音等阶段——那些阶段只应该处理旁白正文，标记只在字幕
+        阶段被用来解析时间。
+        """
+        params = VideoParams(video_subject="Coffee")
+        raw_script = "Hello world. [card 1: Surprise!] More text."
+        expected_clean_script = "Hello world. More text."
+
+        with (
+            patch.object(tm, "generate_script", return_value=raw_script),
+            patch.object(
+                tm, "generate_terms", return_value=["coffee"]
+            ) as generate_terms,
+            patch.object(tm, "save_script_data") as save_script_data,
+            patch.object(
+                tm, "generate_audio", return_value=("audio.mp3", 5, object())
+            ) as generate_audio,
+            patch.object(
+                tm, "generate_subtitle", return_value=("subtitle.srt", [])
+            ) as generate_subtitle,
+            patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
+            patch.object(tm, "generate_final_videos") as generate_final,
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            tm.start("card-marker-extraction", params, stop_at="materials")
+
+        generate_terms.assert_called_once_with(
+            "card-marker-extraction", params, expected_clean_script
+        )
+        self.assertEqual(generate_audio.call_args.args[2], expected_clean_script)
+        save_script_data.assert_called_once_with(
+            "card-marker-extraction", expected_clean_script, ["coffee"], params
+        )
+        passed_markers = generate_subtitle.call_args.kwargs["card_markers"]
+        self.assertEqual(len(passed_markers), 1)
+        self.assertEqual(passed_markers[0].slot, 1)
+        self.assertEqual(passed_markers[0].text, "Surprise!")
+        generate_final.assert_not_called()
 
     def test_start_returns_each_intermediate_result(self):
         """
@@ -857,7 +980,7 @@ class TestTaskService(unittest.TestCase):
                     patch.object(
                         tm,
                         "generate_subtitle",
-                        return_value="subtitle.srt",
+                        return_value=("subtitle.srt", []),
                     ),
                     patch.object(
                         tm,
@@ -891,7 +1014,7 @@ class TestTaskService(unittest.TestCase):
                 "generate_audio",
                 return_value=("audio.mp3", 5, object()),
             ),
-            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "generate_subtitle", return_value=("subtitle.srt", [])),
             patch.object(
                 tm,
                 "get_video_materials",
@@ -953,7 +1076,7 @@ class TestTaskService(unittest.TestCase):
                     patch.object(tm, "generate_terms", return_value=["coffee"]),
                     patch.object(tm, "save_script_data"),
                     patch.object(tm, "generate_audio", return_value=audio_result),
-                    patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+                    patch.object(tm, "generate_subtitle", return_value=("subtitle.srt", [])),
                     patch.object(
                         tm,
                         "get_video_materials",
@@ -1034,7 +1157,7 @@ class TestTaskService(unittest.TestCase):
                 "generate_audio",
                 return_value=("audio.mp3", 5, object()),
             ),
-            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "generate_subtitle", return_value=("subtitle.srt", [])),
             patch.object(
                 tm,
                 "get_video_materials",
@@ -1132,7 +1255,7 @@ class TestTaskService(unittest.TestCase):
                 "generate_audio",
                 return_value=("audio.mp3", 5, object()),
             ),
-            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "generate_subtitle", return_value=("subtitle.srt", [])),
             patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
             patch.object(
                 tm,
@@ -1230,7 +1353,7 @@ class TestTaskService(unittest.TestCase):
                 "generate_audio",
                 return_value=("audio.mp3", 5, object()),
             ),
-            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "generate_subtitle", return_value=("subtitle.srt", [])),
             patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
             patch.object(
                 tm,

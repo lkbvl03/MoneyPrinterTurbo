@@ -27,6 +27,7 @@ from app.services import (
 )
 from app.services import upload_post
 from app.services import state as sm
+from app.services.utils.card_markers import extract_card_markers
 from app.utils import file_security, utils
 
 
@@ -544,17 +545,23 @@ def _resolve_subtitle_max_line_length(params, video_script) -> int:
     return min(preferred_cap, pixel_cap)
 
 
-def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
+def generate_subtitle(
+    task_id, params, video_script, sub_maker, audio_file, card_markers=None
+):
     '''
     Generate subtitle for the video script.
-    If subtitle generation is disabled or no subtitle maker is provided, it will return an empty string.
+    If subtitle generation is disabled or no subtitle maker is provided, it will return an empty
+    string and an empty card-timing list.
     Otherwise, it will generate the subtitle using the specified provider.
     Returns:
         - subtitle_path: path to the generated subtitle file
+        - card_timings: list of ResolvedCardTiming resolved from any [card N: ...]
+          markers extracted from the script (empty when there were none, or when
+          subtitles are disabled/unavailable)
     '''
     logger.info("\n\n## generating subtitle")
     if not params.subtitle_enabled:
-        return ""
+        return "", []
 
     subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
@@ -562,11 +569,21 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 
     if not subtitle_provider:
         logger.info("subtitle provider is empty, skip subtitle generation")
-        return ""
+        return "", []
 
     max_line_length = _resolve_subtitle_max_line_length(params, video_script)
 
-    if sub_maker is None and subtitle_provider != "whisper":
+    if card_markers and subtitle_provider != "whisper":
+        # 卡片文字标记的出现时间来自 Whisper 逐词时间戳（见
+        # subtitle._resolve_card_marker_timestamps），Edge/Azure 等 TTS 时间轴
+        # 不提供这个粒度的信息，所以只要脚本里有 [card N: ...] 标记，就必须
+        # 强制走 Whisper，不管用户配置的默认 provider 是什么。
+        logger.info(
+            "card text markers found in script; forcing whisper subtitle "
+            "provider to resolve their timing"
+        )
+        subtitle_provider = "whisper"
+    elif sub_maker is None and subtitle_provider != "whisper":
         # 自定义音频不会经过 TTS，因此没有 Edge/Azure 等 TTS 返回的
         # sub_maker 时间轴，Edge 字幕流程完全无法工作。Whisper 可以直接从
         # 音频文件转写，因此这里自动切换到 Whisper，而不是静默跳过字幕
@@ -593,8 +610,9 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
                 "edge subtitle generation did not produce a subtitle file; "
                 "skip subtitles without falling back to whisper"
             )
-            return ""
+            return "", []
 
+    card_timings = []
     if subtitle_provider == "whisper":
         # create() 在传入 video_script 时，直接按脚本原文的词序位置对齐 Whisper
         # 逐词时间戳（见 _align_script_lines_to_word_timestamps），写入的每一
@@ -603,19 +621,22 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         # correct() 在这条路径上已经不会做任何改动，调用它只是多一次无意义
         # 的文件读取和比对。真正需要“脚本与转写不一致时如何处理”的地方，
         # 请直接完善 create()/_align_script_lines_to_word_timestamps 本身。
-        subtitle.create(
+        result = subtitle.create(
             audio_file=audio_file,
             subtitle_file=subtitle_path,
             max_line_length=max_line_length,
             video_script=video_script,
+            card_markers=card_markers,
         )
+        if isinstance(result, list):
+            card_timings = result
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)
     if not subtitle_lines:
         logger.warning(f"subtitle file is invalid: {subtitle_path}")
-        return ""
+        return "", []
 
-    return subtitle_path
+    return subtitle_path, card_timings
 
 
 def get_video_materials(task_id, params, video_terms, audio_duration):
@@ -1155,6 +1176,11 @@ def _run_pipeline(
         )
         return _mark_task_failed(task_id, "script", error)
 
+    # [card N: 文字] 标记只在这里被解析和剥离一次，之后所有阶段（分词、配音、
+    # 存档、字幕对齐）看到的都是干净的旁白正文；标记本身只用来在字幕阶段
+    # 通过 Whisper 逐词时间戳换算出现时间（见 generate_subtitle）。
+    video_script, card_markers = extract_card_markers(video_script)
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
 
     if stop_at == "script":
@@ -1210,8 +1236,8 @@ def _run_pipeline(
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
+    subtitle_path, card_timings = generate_subtitle(
+        task_id, params, video_script, sub_maker, audio_file, card_markers=card_markers
     )
 
     if stop_at == "subtitle":

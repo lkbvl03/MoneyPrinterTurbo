@@ -954,7 +954,7 @@ class TestVoiceService(unittest.TestCase):
         ):
             task_id = "gemini-subtitle-edge-task"
             Path(tmp_dir, task_id).mkdir(parents=True, exist_ok=True)
-            subtitle_path = task_service.generate_subtitle(
+            subtitle_path, _card_timings = task_service.generate_subtitle(
                 task_id=task_id,
                 params=type("Params", (), {"subtitle_enabled": True, "video_aspect": "16:9"})(),
                 video_script=script,
