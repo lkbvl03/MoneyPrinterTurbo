@@ -1,8 +1,9 @@
 import json
 import os.path
 import re
+from dataclasses import dataclass
 from timeit import default_timer as timer
-from typing import Optional
+from typing import List, Optional, Tuple
 
 try:
     from faster_whisper import WhisperModel
@@ -11,6 +12,7 @@ except ImportError:
 from loguru import logger
 
 from app.config import config
+from app.services.utils.card_markers import CardMarker
 from app.utils import utils
 
 model_size = config.whisper.get("model_size", "large-v3")
@@ -21,6 +23,17 @@ model = None
 # 找不到已识别词可参考语速时的保底值：大致的中等语速朗读节奏。
 _DEFAULT_CHARS_PER_SECOND = 12.0
 _MIN_EXTRAPOLATED_DURATION = 0.5
+
+# 找不到已识别词可参考语速时的保底值：卡片标记锚点超出 Whisper 识别范围
+# 需要外推时，假设的平均每词耗时（秒）。
+_DEFAULT_SECONDS_PER_WORD = 0.4
+
+
+@dataclass(frozen=True)
+class ResolvedCardTiming:
+    slot: int
+    text: str
+    start_time: float
 
 
 def _flatten_whisper_words(segments):
@@ -47,6 +60,47 @@ def _chars_per_second_from_words(words) -> float:
     if total_chars <= 0 or total_seconds <= 0:
         return _DEFAULT_CHARS_PER_SECOND
     return total_chars / total_seconds
+
+
+def _seconds_per_word_from_words(words: List[Tuple[str, float, float]]) -> float:
+    if len(words) < 2:
+        return _DEFAULT_SECONDS_PER_WORD
+    total_seconds = words[-1][2] - words[0][1]
+    if total_seconds <= 0:
+        return _DEFAULT_SECONDS_PER_WORD
+    return total_seconds / len(words)
+
+
+def _resolve_card_marker_timestamps(
+    markers: List[CardMarker], whisper_words: List[Tuple[str, float, float]]
+) -> List[ResolvedCardTiming]:
+    """把 [card N: ...] 标记在清理后脚本里的词序位置（anchor_word_index）
+    对应到 Whisper 逐词时间戳——原理和 _align_script_lines_to_word_timestamps
+    完全一致：脚本词序和 Whisper 识别出的词序一一对应，只用位置不用文字去对
+    齐，避免文本不一致（Whisper 听错、脚本被清理过）导致的错位。
+
+    卡片的出现时间取锚点词的结束时间（而不是开始时间）——锚点词是标记前面
+    紧邻的最后一个词，只有等它读完，卡片才应该出现，这样才不会在那个词还
+    没读完时就提前弹出。
+
+    锚点超出 Whisper 实际识别到的词数时（识别遗漏、静音检测误判等），按已
+    识别部分算出的平均语速继续向后外推，不产生 0 秒占位。
+    """
+    seconds_per_word = _seconds_per_word_from_words(whisper_words)
+    results = []
+    for marker in markers:
+        if marker.anchor_word_index < len(whisper_words):
+            start_time = whisper_words[marker.anchor_word_index][2]
+        elif whisper_words:
+            last_end = whisper_words[-1][2]
+            words_beyond = marker.anchor_word_index - (len(whisper_words) - 1)
+            start_time = last_end + words_beyond * seconds_per_word
+        else:
+            start_time = marker.anchor_word_index * seconds_per_word
+        results.append(
+            ResolvedCardTiming(slot=marker.slot, text=marker.text, start_time=start_time)
+        )
+    return results
 
 
 def _align_script_lines_to_word_timestamps(script_lines, whisper_words):
@@ -97,6 +151,7 @@ def create(
     subtitle_file: str = "",
     max_line_length: Optional[int] = None,
     video_script: str = "",
+    card_markers: Optional[List[CardMarker]] = None,
 ):
     global model
     if WhisperModel is None:
@@ -157,6 +212,11 @@ def create(
             else utils.split_string_by_punctuations(normalized_script)
         )
         whisper_words = _flatten_whisper_words(segments)
+        card_timings = (
+            _resolve_card_marker_timestamps(card_markers, whisper_words)
+            if card_markers
+            else []
+        )
         for text, line_start, line_end in _align_script_lines_to_word_timestamps(
             script_lines, whisper_words
         ):
@@ -164,6 +224,7 @@ def create(
                 {"msg": text, "start_time": line_start, "end_time": line_end}
             )
     else:
+        card_timings = []
 
         def recognized(seg_text, seg_start, seg_end):
             seg_text = seg_text.strip()
@@ -253,6 +314,7 @@ def create(
     with open(subtitle_file, "w", encoding="utf-8") as f:
         f.write(sub)
     logger.info(f"subtitle file created: {subtitle_file}")
+    return card_timings
 
 
 def file_to_subtitles(filename):
