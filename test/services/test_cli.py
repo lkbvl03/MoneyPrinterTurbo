@@ -661,6 +661,54 @@ class TestCli(unittest.TestCase):
             )
         self.assertEqual(cm.exception.code, 2)
 
+    def test_card_text_config_accepts_a_valid_single_slot(self):
+        raw = '[{"slot": 1, "style": "minimal_white", "effect": "slide_left", "sound": "auto"}]'
+        args = cli.parse_args(
+            ["--video-subject", "测试主题", "--card-text-config", raw]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.card_text_config, raw)
+
+    def test_card_text_config_accepts_random_for_style_and_effect(self):
+        raw = '[{"slot": 1, "style": "random", "effect": "random"}]'
+        args = cli.parse_args(
+            ["--video-subject", "测试主题", "--card-text-config", raw]
+        )
+        params = cli.build_video_params(args)
+        self.assertEqual(params.card_text_config, raw)
+
+    def test_card_text_config_defaults_to_none(self):
+        args = cli.parse_args(["--video-subject", "测试主题"])
+        params = cli.build_video_params(args)
+        self.assertIsNone(params.card_text_config)
+
+    def test_card_text_config_rejects_malformed_json(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args(
+                ["--video-subject", "测试主题", "--card-text-config", "not json"]
+            )
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_card_text_config_rejects_unknown_style_name(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args(
+                [
+                    "--video-subject", "测试主题",
+                    "--card-text-config",
+                    '[{"slot": 1, "style": "nonexistent", "effect": "slide_left"}]',
+                ]
+            )
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_card_text_config_rejects_duplicate_slot_numbers(self):
+        raw = (
+            '[{"slot": 1, "style": "minimal_white", "effect": "slide_left"},'
+            ' {"slot": 1, "style": "bold_yellow_box", "effect": "bounce"}]'
+        )
+        with self.assertRaises(SystemExit) as cm:
+            cli.parse_args(["--video-subject", "测试主题", "--card-text-config", raw])
+        self.assertEqual(cm.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

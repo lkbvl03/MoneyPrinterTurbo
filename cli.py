@@ -158,6 +158,76 @@ def _overlay_effect(value: str) -> str:
     return normalized
 
 
+def _card_text_config(value: str) -> str:
+    # 延迟导入的原因和 _overlay_effect 一样：避免 `cli.py -h` 也要初始化卡片
+    # 目录模块。
+    from app.services.utils.card_text import CARD_EFFECTS, CARD_STYLES
+    from app.services.utils.card_text._sounds import CARD_SOUNDS
+
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+
+    try:
+        slots = json.loads(normalized)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"card-text-config must be valid JSON: {exc}")
+
+    if not isinstance(slots, list):
+        raise argparse.ArgumentTypeError(
+            "card-text-config must be a JSON array of slot objects"
+        )
+
+    allowed_styles = {"random", *CARD_STYLES}
+    allowed_effects = {"random", *CARD_EFFECTS}
+    allowed_sounds = {"auto", "none", *CARD_SOUNDS}
+    seen_slots = set()
+
+    for entry in slots:
+        if not isinstance(entry, dict):
+            raise argparse.ArgumentTypeError(
+                "each card-text-config entry must be a JSON object"
+            )
+
+        missing = {"slot", "style", "effect"} - entry.keys()
+        if missing:
+            raise argparse.ArgumentTypeError(
+                f"card-text-config entry is missing required keys: {sorted(missing)}"
+            )
+
+        slot = entry["slot"]
+        if not isinstance(slot, int) or slot < 1:
+            raise argparse.ArgumentTypeError(
+                "card-text-config 'slot' must be a positive integer"
+            )
+        if slot in seen_slots:
+            raise argparse.ArgumentTypeError(
+                f"card-text-config has duplicate slot number: {slot}"
+            )
+        seen_slots.add(slot)
+
+        if entry["style"] not in allowed_styles:
+            allowed = ", ".join(sorted(allowed_styles))
+            raise argparse.ArgumentTypeError(
+                f"card-text-config 'style' must be one of: {allowed}"
+            )
+
+        if entry["effect"] not in allowed_effects:
+            allowed = ", ".join(sorted(allowed_effects))
+            raise argparse.ArgumentTypeError(
+                f"card-text-config 'effect' must be one of: {allowed}"
+            )
+
+        sound = entry.get("sound", "auto")
+        if sound not in allowed_sounds:
+            allowed = ", ".join(sorted(allowed_sounds))
+            raise argparse.ArgumentTypeError(
+                f"card-text-config 'sound' must be one of: {allowed}"
+            )
+
+    return normalized
+
+
 def _bgm_type(value: str) -> str:
     normalized = value.strip().lower()
     if normalized == "none":
@@ -320,6 +390,17 @@ Output and exit status:
             "cinematic visual effect applied per source clip (rain, snow, fire, "
             "lightning, film grain, camera pan/zoom, ...), independent of "
             "--video-transition-style (default: none)"
+        ),
+    )
+    video_group.add_argument(
+        "--card-text-config",
+        type=_card_text_config,
+        default=None,
+        metavar="JSON",
+        help=(
+            "JSON array configuring card text overlay slots, e.g. "
+            '[{"slot":1,"style":"minimal_white","effect":"slide_left","sound":"auto"}] '
+            "(default: no card text overlays)"
         ),
     )
     video_group.add_argument(
@@ -603,6 +684,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_transition_mode",
         "video_transition_style",
         "video_overlay_effect",
+        "card_text_config",
         "video_clip_duration",
         "match_materials_to_script",
         "n_threads",
