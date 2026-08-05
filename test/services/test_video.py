@@ -276,7 +276,9 @@ class TestVideoService(unittest.TestCase):
             vd.ResolvedCardTiming(slot=1, text="Second", start_time=2.2),
         ]
 
-        source_video = _FakeMoviePyClip()
+        # 背景视频足够长，确保这里断言的是“避免与下一张卡片重叠”的缩短逻辑，
+        # 不会被“不超过背景视频结尾”的夹紧逻辑干扰。
+        source_video = _FakeMoviePyClip(duration=30)
         voice_source = _FakeMoviePyClip()
         composited_video = _FakeMoviePyClip()
         final_video = _FakeMoviePyClip()
@@ -309,6 +311,156 @@ class TestVideoService(unittest.TestCase):
         first_card_clip, second_card_clip = captured["clips"][1], captured["clips"][2]
         self.assertAlmostEqual(first_card_clip.duration, 1.2)
         self.assertAlmostEqual(second_card_clip.duration, 3.0)
+
+    def test_generate_video_clamps_card_duration_to_background_video_length(self):
+        """脚本结尾的标记（例如“记得关注”）会在接近背景视频末尾的位置开始，
+        默认 3 秒时长会把成片拖长出一段黑尾。卡片的 start + duration 必须被
+        夹紧在背景视频真实时长之内。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "slide_left",'
+                ' "sound": "none"}]'
+            ),
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(slot=1, text="Follow for more!", start_time=4.5)
+        ]
+
+        source_video = _FakeMoviePyClip(duration=5)
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        card_clip = captured["clips"][1]
+        self.assertEqual(card_clip.start, 4.5)
+        self.assertAlmostEqual(card_clip.duration, 0.5)
+        self.assertLessEqual(card_clip.start + card_clip.duration, 5)
+
+    def test_generate_video_skips_card_starting_at_or_after_background_end(self):
+        """开始时间已经到达（或超过）背景视频结尾的卡片没有任何可展示的画面，
+        必须整张跳过，不能靠它把成片拉长。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "slide_left",'
+                ' "sound": "none"}]'
+            ),
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(slot=1, text="Too late", start_time=5.0)
+        ]
+
+        source_video = _FakeMoviePyClip(duration=5)
+        voice_source = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        source_video.with_audio_result = final_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(vd, "CompositeVideoClip") as composite_video_clip,
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        # 唯一一张卡片被跳过，没有任何卡片需要合成。
+        composite_video_clip.assert_not_called()
+
+    def test_generate_video_shortens_cards_sharing_identical_start_time(self):
+        """相邻标记之间没有旁白词时会解析出完全相同的开始时间（间隔为 0）。
+        这些卡片必须同样被缩短（下限 0.1 秒），不能各自保留默认 3 秒而完全
+        重叠在同一位置。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "slide_left",'
+                ' "sound": "none"}]'
+            ),
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(slot=1, text="First", start_time=1.0),
+            vd.ResolvedCardTiming(slot=1, text="Second", start_time=1.0),
+            vd.ResolvedCardTiming(slot=1, text="Third", start_time=1.0),
+        ]
+
+        source_video = _FakeMoviePyClip(duration=5)
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        first_card_clip, second_card_clip = captured["clips"][1], captured["clips"][2]
+        self.assertAlmostEqual(first_card_clip.duration, 0.1)
+        self.assertAlmostEqual(second_card_clip.duration, 0.1)
+        # 最后一张后面没有卡片，保持默认时长（仍在背景视频时长之内）。
+        self.assertAlmostEqual(captured["clips"][3].duration, 3.0)
 
     def test_generate_video_mixes_synthesized_sound_for_card_text_effect(self):
         """sound 设为 auto 时，必须按卡片特效所属分组解析出对应的合成音效，

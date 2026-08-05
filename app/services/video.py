@@ -1182,6 +1182,9 @@ def _resolve_subtitle_font_path(font_path: str, subtitle_text: str) -> str:
 # 自定义 UI）。
 _CARD_VERTICAL_CENTER_RATIO = 0.4
 
+# 两张卡片开始时间完全相同时缩短后的时长下限，避免生成时长为 0 的隐形片段。
+_MIN_CARD_DURATION_SECONDS = 0.1
+
 
 def generate_video(
     video_path: str,
@@ -1427,6 +1430,11 @@ def generate_video(
 
         card_clips = []
         card_sound_clips = []
+        # CompositeVideoClip 的时长等于所有子片段 end 的最大值，所以卡片必须先按
+        # 背景视频（此时 video_clip 还是背景/字幕合成，尚未叠加卡片）的真实时长
+        # 夹紧，否则脚本末尾的标记会把成片拖长 1~3 秒，尾部只剩黑帧和悬空卡片，
+        # 也会让后面按 video_clip.duration 计算的 BGM 循环时长跟着变长。
+        background_duration = video_clip.duration
         if card_timings and params.card_text_config:
             card_slot_configs = {
                 entry["slot"]: entry for entry in json.loads(params.card_text_config)
@@ -1451,16 +1459,33 @@ def generate_video(
                 renderable_timings.append((timing, slot_config))
 
             for index, (timing, slot_config) in enumerate(renderable_timings):
+                # 卡片开始时间已经到达或超过背景视频结尾时没有任何可展示的画面，
+                # 按和“没有配置也没有插槽 1 回退”一样的方式跳过：只记警告，不
+                # 中断整段视频，也不会因为它把成片拉长。
+                if timing.start_time >= background_duration:
+                    logger.warning(
+                        f"card text marker for slot {timing.slot} starts at "
+                        f"{timing.start_time:.2f}s, which is at or past the end of "
+                        f"the background video ({background_duration:.2f}s); skipping"
+                    )
+                    continue
+
                 # 每张卡片默认显示 card_text.DEFAULT_CARD_DURATION_SECONDS 秒；
                 # 如果下一张卡片比这更早开始，就把当前卡片的时长缩短到刚好等于
                 # 到下一张卡片的间隔，避免两张卡片在画面上重叠（规格中的决策）。
                 # 缩短只按真正会被渲染的卡片计算，被跳过的标记不参与间隔计算。
+                # 间隔为 0（相邻标记之间没有旁白词，解析出同一个开始时间）时也
+                # 必须缩短，否则两张卡片会完全重叠；但要保留 0.1 秒下限，避免
+                # 生成时长为 0 的隐形片段。
                 duration = card_text.DEFAULT_CARD_DURATION_SECONDS
                 if index + 1 < len(renderable_timings):
                     next_start = renderable_timings[index + 1][0].start_time
                     gap = next_start - timing.start_time
-                    if 0 < gap < duration:
-                        duration = gap
+                    if gap < duration:
+                        duration = max(gap, _MIN_CARD_DURATION_SECONDS)
+                # 无论是否因为下一张卡片缩短过，都不能越过背景视频的结尾，两个
+                # 约束取更小的那一个。
+                duration = min(duration, background_duration - timing.start_time)
 
                 style_name = card_text.resolve_style_name(slot_config.get("style"))
                 effect_name = card_text.resolve_effect_name(slot_config.get("effect"))
