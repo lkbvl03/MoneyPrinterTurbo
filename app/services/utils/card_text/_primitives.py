@@ -155,17 +155,16 @@ def _make_custom_frame_effect(frame_fn: CustomFrameFn):
     return build
 
 
-# --- Card box rendering (dùng chung cho mọi mẫu thẻ trong _styles.py) -----------
+# --- 卡片框渲染（供 _styles.py 中所有卡片样式共用）-----------
 
-# Spec yêu cầu chiều rộng thẻ tối đa = 80% chiều rộng khung hình thật (thay
-# đổi theo video_width, ví dụ 864px cho portrait 1080, 1536px cho landscape
-# 1920). Ở Plan A dùng cố định 640px làm giới hạn wrap nội bộ, đơn giản hóa
-# có chủ đích: 640px luôn nhỏ hơn 80% mọi độ phân giải MPT hỗ trợ (portrait/
-# square/landscape), nên thẻ KHÔNG BAO GIỜ vượt quá giới hạn 80% (an toàn,
-# không tràn khung hình) — chỉ khác là thẻ không tự phóng to hết cỡ trên
-# khung hình rộng (16:9). Nếu cần thẻ to hơn tương ứng theo từng độ phân giải,
-# đó là việc của Plan B (thêm tham số max_text_width cho render_card_clip),
-# không phải bug cần chặn Plan A.
+# 规范要求卡片最大宽度 = 真实画面宽度的 80%（随 video_width 变化，例如
+# portrait 1080 对应 864px，landscape 1920 对应 1536px）。这里固定用
+# 640px 作为内部换行的宽度上限，是有意简化：640px 始终小于本项目支持的
+# 所有分辨率（竖屏/方形/横屏）的 80%，因此卡片永远不会超过 80% 的上限
+# （不会溢出画面），唯一的代价是在较宽的 16:9 画面上卡片不会自动放大
+# 到占满宽度。后续如需让卡片宽度随分辨率等比放大，可以给 render_card_clip
+# 增加一个显式的 max_text_width 参数；目前未做，因为 640px 在所有支持的
+# 分辨率下都不会溢出。
 _CARD_PADDING = 24
 _CARD_MAX_TEXT_WIDTH = 640
 _CARD_LINE_SPACING = 8
