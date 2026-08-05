@@ -11,6 +11,10 @@ from app.services.utils.card_text._effects_bounce import (
     CATEGORY_EFFECTS as BOUNCE_EFFECTS,
     GROUP_NAME as BOUNCE_GROUP,
 )
+from app.services.utils.card_text._effects_light import (
+    CATEGORY_EFFECTS as LIGHT_EFFECTS,
+    GROUP_NAME as LIGHT_GROUP,
+)
 from app.services.utils.card_text._effects_motion import (
     CATEGORY_EFFECTS as MOTION_EFFECTS,
     GROUP_NAME as MOTION_GROUP,
@@ -18,6 +22,10 @@ from app.services.utils.card_text._effects_motion import (
 from app.services.utils.card_text._effects_rotation import (
     CATEGORY_EFFECTS as ROTATION_EFFECTS,
     GROUP_NAME as ROTATION_GROUP,
+)
+from app.services.utils.card_text._effects_text_reveal import (
+    CATEGORY_EFFECTS as TEXT_REVEAL_EFFECTS,
+    GROUP_NAME as TEXT_REVEAL_GROUP,
 )
 
 
@@ -78,6 +86,43 @@ class TestRotationEffects(unittest.TestCase):
         self.addCleanup(clip.close)
         frame = clip.get_frame(0.9)
         self.assertEqual(frame.shape[:2], (60, 120))
+
+
+class TestTextRevealEffects(unittest.TestCase):
+    def test_group_name(self):
+        self.assertEqual(TEXT_REVEAL_GROUP, "text_reveal")
+
+    def test_typewriter_registered(self):
+        self.assertIn("typewriter", TEXT_REVEAL_EFFECTS)
+
+    def test_typewriter_reveals_more_columns_over_time_during_enter(self):
+        card = _solid_card(200, 50)
+        clip = TEXT_REVEAL_EFFECTS["typewriter"](card, 0.6, 1.0, 0.6)
+        self.addCleanup(clip.close)
+        early_mask = clip.mask.get_frame(0.1)
+        late_mask = clip.mask.get_frame(0.5)
+        self.assertLess(early_mask.sum(), late_mask.sum())
+
+    def test_typewriter_frame_shape_matches_card_shape(self):
+        card = _solid_card(200, 50)
+        clip = TEXT_REVEAL_EFFECTS["typewriter"](card, 0.6, 1.0, 0.6)
+        self.addCleanup(clip.close)
+        frame = clip.get_frame(1.0)
+        self.assertEqual(frame.shape[:2], (50, 200))
+
+
+class TestLightEffects(unittest.TestCase):
+    def test_group_name(self):
+        self.assertEqual(LIGHT_GROUP, "light")
+
+    def test_glow_pulse_registered(self):
+        self.assertIn("glow_pulse", LIGHT_EFFECTS)
+
+    def test_glow_pulse_produces_valid_clip(self):
+        card = _solid_card()
+        clip = LIGHT_EFFECTS["glow_pulse"](card, 0.3, 1.0, 0.3)
+        self.addCleanup(clip.close)
+        self.assertAlmostEqual(clip.duration, 1.6)
 
 
 if __name__ == "__main__":
