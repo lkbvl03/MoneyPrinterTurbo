@@ -21,8 +21,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from app.config import config
 from app.models.schema import MaterialInfo
 from app.services import video as vd
+from app.services.subtitle import ResolvedCardTiming
 from app.services.utils import xfade_transitions
 from app.utils import utils
+
+vd.ResolvedCardTiming = ResolvedCardTiming
 
 resources_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources")
 
@@ -154,6 +157,236 @@ class TestVideoService(unittest.TestCase):
         self.assertEqual(voice_source.close_calls, 1)
         self.assertEqual(bgm_source.close_calls, 1)
         self.assertEqual(final_video.close_calls, 1)
+
+    def test_generate_video_composites_card_text_at_resolved_start_time(self):
+        """
+        每个 [card N: ...] 标记必须按解析出的开始时间合成进画面。脚本引用了
+        card_text_config 里没有配置的插槽号时，按规格要求回退使用插槽 1 的
+        配置（不是跳过）——这里第 2 张卡片引用不存在的 slot 5，必须仍然被
+        渲染出来，套用 slot 1 的配置。
+        """
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            video_aspect="16:9",
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "slide_left",'
+                ' "sound": "none"}]'
+            ),
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(slot=1, text="Wow!", start_time=1.5),
+            vd.ResolvedCardTiming(slot=5, text="Falls back to slot 1", start_time=3.0),
+        ]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        composited_clips = captured["clips"]
+        # [背景视频, slot 1 卡片, slot 5 回退用 slot 1 配置渲染的卡片]
+        self.assertEqual(len(composited_clips), 3)
+        self.assertEqual(composited_clips[1].start, 1.5)
+        self.assertEqual(composited_clips[2].start, 3.0)
+
+    def test_generate_video_skips_card_marker_with_no_config_and_no_slot_1_fallback(self):
+        """
+        引用的插槽号既没有自己的配置，card_text_config 里也完全没有配置 slot
+        1 可以回退时，必须跳过这个标记，不能让整段视频生成失败或抛异常。
+        """
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            card_text_config=(
+                '[{"slot": 2, "style": "minimal_white", "effect": "slide_left"}]'
+            ),
+        )
+        card_timings = [vd.ResolvedCardTiming(slot=5, text="No fallback", start_time=1.0)]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        source_video.with_audio_result = final_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(vd, "CompositeVideoClip") as composite_video_clip,
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        # 没有任何卡片能渲染，CompositeVideoClip 完全不应该被调用（既没有字幕
+        # 也没有卡片时，跳过合成，直接用原始背景视频）。
+        composite_video_clip.assert_not_called()
+
+    def test_generate_video_shortens_card_duration_to_avoid_overlapping_next_card(self):
+        """两张卡片时间间隔小于默认 3 秒时，前一张卡片的显示时长必须缩短到
+        刚好衔接下一张卡片开始的时间，不能让两张卡片同时显示重叠。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "slide_left",'
+                ' "sound": "none"}]'
+            ),
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(slot=1, text="First", start_time=1.0),
+            vd.ResolvedCardTiming(slot=1, text="Second", start_time=2.2),
+        ]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        first_card_clip, second_card_clip = captured["clips"][1], captured["clips"][2]
+        self.assertAlmostEqual(first_card_clip.duration, 1.2)
+        self.assertAlmostEqual(second_card_clip.duration, 3.0)
+
+    def test_generate_video_mixes_synthesized_sound_for_card_text_effect(self):
+        """sound 设为 auto 时，必须按卡片特效所属分组解析出对应的合成音效，
+        并和旁白一起混入最终音轨。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "bounce",'
+                ' "sound": "auto"}]'
+            ),
+        )
+        card_timings = [vd.ResolvedCardTiming(slot=1, text="Boing", start_time=0.5)]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        mixed_audio = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_audio_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return mixed_audio
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(vd, "CompositeVideoClip", return_value=composited_video),
+            patch.object(
+                vd, "CompositeAudioClip", side_effect=fake_composite_audio_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        audio_clips = captured["clips"]
+        # [旁白, 卡片合成音效]
+        self.assertEqual(len(audio_clips), 2)
+        self.assertEqual(audio_clips[1].start, 0.5)
+
+    def test_generate_video_without_card_timings_matches_current_behavior(self):
+        """不传 card_timings（现有所有调用方式）必须与今天完全一致——回归保护。"""
+        params = vd.VideoParams(
+            video_subject="test", subtitle_enabled=False, bgm_type=""
+        )
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        source_video.with_audio_result = final_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
 
     def test_generate_video_keeps_output_and_reports_failed_bgm_mix(self):
         """BGM 打开失败时仍应只写一次无 BGM 视频，并返回 False。"""

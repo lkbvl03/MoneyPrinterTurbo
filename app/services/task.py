@@ -682,7 +682,8 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration,
+    card_timings=None,
 ):
     final_video_paths = []
     combined_video_paths = []
@@ -765,6 +766,7 @@ def generate_final_videos(
             output_file=final_video_path,
             params=params,
             bgm_file_override=bgm_file_override,
+            card_timings=card_timings,
         )
         if (
             video_music_provider is not None
@@ -1286,6 +1288,7 @@ def _run_pipeline(
         audio_file,
         subtitle_path,
         audio_duration,
+        card_timings=card_timings,
     )
 
     if not final_video_paths:

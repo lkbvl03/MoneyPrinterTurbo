@@ -1,3 +1,4 @@
+import json
 import itertools
 import io
 import os
@@ -13,6 +14,7 @@ from typing import List, Optional
 from loguru import logger
 import numpy as np
 from moviepy import (
+    AudioArrayClip,
     AudioFileClip,
     ColorClip,
     CompositeAudioClip,
@@ -38,6 +40,9 @@ from app.services import bgm as bgm_service
 from app.services.utils import video_effects
 from app.services.utils import xfade_transitions
 from app.services.utils import video_overlay_effects
+from app.services.subtitle import ResolvedCardTiming
+from app.services.utils import card_text
+from app.services.utils.card_text import _sounds as card_text_sounds
 from app.utils import file_security, utils
 
 class SubClippedVideoClip:
@@ -1173,6 +1178,11 @@ def _resolve_subtitle_font_path(font_path: str, subtitle_text: str) -> str:
     return font_path
 
 
+# 卡片文字水平居中、垂直中心固定在画面高度 40% 处（规格明确要求：不提供位置
+# 自定义 UI）。
+_CARD_VERTICAL_CENTER_RATIO = 0.4
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1180,6 +1190,7 @@ def generate_video(
     output_file: str,
     params: VideoParams,
     bgm_file_override: str | None = None,
+    card_timings: Optional[List[ResolvedCardTiming]] = None,
 ) -> bool:
     """
     合成最终视频，并返回本次背景音乐处理是否成功。
@@ -1414,6 +1425,70 @@ def generate_video(
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
+        card_clips = []
+        card_sound_clips = []
+        if card_timings and params.card_text_config:
+            card_slot_configs = {
+                entry["slot"]: entry for entry in json.loads(params.card_text_config)
+            }
+            # 规格约定：脚本引用了未配置的插槽时，必须回退使用“卡片 1”的配置
+            # 作为安全方案，而不是直接跳过这个标记。只有当标记引用的插槽和
+            # 插槽 1 都不在 card_text_config 里（包括 card_text_config 完全
+            # 为空的情况）时，该标记才真正被跳过，只记警告不中断整段视频。
+            # card_timings 本身已按标记在脚本中出现的先后排列（见
+            # card_markers.extract_card_markers），所以 renderable_timings
+            # 同样保持开始时间递增的顺序。
+            renderable_timings = []
+            for timing in card_timings:
+                slot_config = card_slot_configs.get(timing.slot) or card_slot_configs.get(1)
+                if slot_config is None:
+                    logger.warning(
+                        f"card text marker references slot {timing.slot}, which has "
+                        f"no matching entry in card_text_config and there is no slot 1 "
+                        f"to fall back to; skipping"
+                    )
+                    continue
+                renderable_timings.append((timing, slot_config))
+
+            for index, (timing, slot_config) in enumerate(renderable_timings):
+                # 每张卡片默认显示 card_text.DEFAULT_CARD_DURATION_SECONDS 秒；
+                # 如果下一张卡片比这更早开始，就把当前卡片的时长缩短到刚好等于
+                # 到下一张卡片的间隔，避免两张卡片在画面上重叠（规格中的决策）。
+                # 缩短只按真正会被渲染的卡片计算，被跳过的标记不参与间隔计算。
+                duration = card_text.DEFAULT_CARD_DURATION_SECONDS
+                if index + 1 < len(renderable_timings):
+                    next_start = renderable_timings[index + 1][0].start_time
+                    gap = next_start - timing.start_time
+                    if 0 < gap < duration:
+                        duration = gap
+
+                style_name = card_text.resolve_style_name(slot_config.get("style"))
+                effect_name = card_text.resolve_effect_name(slot_config.get("effect"))
+                card_clip = card_text.render_card_clip(
+                    timing.text, style_name, effect_name, duration=duration
+                )
+                card_clip = card_clip.with_start(timing.start_time)
+                card_y = video_height * _CARD_VERTICAL_CENTER_RATIO - card_clip.h / 2
+                card_clip = card_clip.with_position(("center", card_y))
+                card_clips.append(card_clip)
+
+                effect_group = card_text.EFFECT_GROUPS[effect_name]
+                sound_name = card_text_sounds.resolve_sound_name(
+                    slot_config.get("sound", "auto"), effect_group
+                )
+                if sound_name is not None:
+                    sound_array = card_text_sounds.CARD_SOUNDS[sound_name](
+                        card_clip.duration
+                    )
+                    sound_clip = AudioArrayClip(
+                        sound_array.reshape(-1, 1), fps=card_text_sounds.SAMPLE_RATE
+                    ).with_start(timing.start_time)
+                    card_sound_clips.append(sound_clip)
+
+        if card_clips:
+            video_clip = CompositeVideoClip([video_clip, *card_clips])
+            clip_stack.callback(video_clip.close)
+
         bgm_enabled = bgm_service.should_use_bgm(
             params.bgm_type, params.bgm_volume
         )
@@ -1460,6 +1535,10 @@ def generate_video(
                     f"failed to mix background music: type={params.bgm_type}, "
                     f"file={bgm_file}"
                 )
+
+        # 卡片出现音效和旁白（以及可能存在的 BGM）一起混入最终音轨。
+        if card_sound_clips:
+            audio_clip = CompositeAudioClip([audio_clip, *card_sound_clips])
 
         final_video_clip = video_clip.with_audio(audio_clip)
         clip_stack.callback(final_video_clip.close)
