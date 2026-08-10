@@ -706,6 +706,15 @@ def generate_final_videos(
     _progress = 50
     for i in range(params.video_count):
         index = i + 1
+        # 批量生成没有其它可见信号说明"正在处理第几个"，WebUI 任务列表需要
+        # current_video_index/video_count 才能显示"视频 X/N"，帮助用户确认
+        # 队列在推进而不是卡住。
+        sm.state.update_task(
+            task_id,
+            progress=_progress,
+            current_video_index=index,
+            video_count=params.video_count,
+        )
         combined_video_path = path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
@@ -725,7 +734,12 @@ def generate_final_videos(
         )
 
         _progress += 50 / params.video_count / 2
-        sm.state.update_task(task_id, progress=_progress)
+        sm.state.update_task(
+            task_id,
+            progress=_progress,
+            current_video_index=index,
+            video_count=params.video_count,
+        )
 
         final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
 
@@ -784,7 +798,12 @@ def generate_final_videos(
             )
 
         _progress += 50 / params.video_count / 2
-        sm.state.update_task(task_id, progress=_progress)
+        sm.state.update_task(
+            task_id,
+            progress=_progress,
+            current_video_index=index,
+            video_count=params.video_count,
+        )
 
         final_video_paths.append(final_video_path)
         combined_video_paths.append(combined_video_path)
@@ -1193,7 +1212,13 @@ def _run_pipeline(
 
     # 2. Generate terms
     video_terms = ""
-    if params.video_source != "local":
+    if params.video_source == "local_library":
+        # Khong goi AI de sinh tu khoa - dung thang chu de/kich ban nguoi
+        # dung nhap lam co so tim trong kho media local, giu MPT hoat dong
+        # doc lap khong can API key khi chi dung tu lieu tu cung cap.
+        fallback_basis = (params.video_subject or "").strip() or video_script[:200]
+        video_terms = [fallback_basis] if fallback_basis else []
+    elif params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             return _mark_task_failed(

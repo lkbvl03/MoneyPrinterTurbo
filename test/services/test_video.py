@@ -217,10 +217,14 @@ class TestVideoService(unittest.TestCase):
         self.assertEqual(composited_clips[1].start, 1.5)
         self.assertEqual(composited_clips[2].start, 3.0)
 
-    def test_generate_video_skips_card_marker_with_no_config_and_no_slot_1_fallback(self):
+    def test_generate_video_renders_card_with_random_style_when_no_config_and_no_slot_1_fallback(
+        self,
+    ):
         """
         引用的插槽号既没有自己的配置，card_text_config 里也完全没有配置 slot
-        1 可以回退时，必须跳过这个标记，不能让整段视频生成失败或抛异常。
+        1 可以回退，marker 本身也没有内联 style/effect 时，卡片依然必须被
+        渲染出来（用随机 style/effect），不能被跳过——ContentStudio 这类
+        完全不传 card_text_config 的前端，卡片也要能正常显示。
         """
         params = vd.VideoParams(
             video_subject="test",
@@ -230,17 +234,29 @@ class TestVideoService(unittest.TestCase):
                 '[{"slot": 2, "style": "minimal_white", "effect": "slide_left"}]'
             ),
         )
-        card_timings = [vd.ResolvedCardTiming(slot=5, text="No fallback", start_time=1.0)]
+        card_timings = [
+            vd.ResolvedCardTiming(
+                slot=5, text="No fallback", start_time=1.0, sound="none"
+            )
+        ]
 
         source_video = _FakeMoviePyClip()
         voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
         final_video = _FakeMoviePyClip()
-        source_video.with_audio_result = final_video
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
 
         with (
             patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
             patch.object(vd, "AudioFileClip", return_value=voice_source),
-            patch.object(vd, "CompositeVideoClip") as composite_video_clip,
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
             patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
             patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
         ):
@@ -255,9 +271,250 @@ class TestVideoService(unittest.TestCase):
 
         self.assertTrue(result)
         writer.assert_called_once()
-        # 没有任何卡片能渲染，CompositeVideoClip 完全不应该被调用（既没有字幕
-        # 也没有卡片时，跳过合成，直接用原始背景视频）。
-        composite_video_clip.assert_not_called()
+        # [背景视频, 用随机 style/effect 渲染出的卡片]
+        composited_clips = captured["clips"]
+        self.assertEqual(len(composited_clips), 2)
+        self.assertEqual(composited_clips[1].start, 1.0)
+
+    def test_generate_video_uses_inline_marker_style_without_card_text_config(self):
+        """
+        marker 自带 style=/effect=/sound= 属性（ContentStudio 只能透传脚本
+        原文时的用法），且完全没有传 card_text_config 时，必须按 marker 内联
+        的属性渲染卡片，而不是随机选择。
+        """
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            video_aspect="16:9",
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(
+                slot=1,
+                text="Inline styled",
+                start_time=1.0,
+                style="bold_yellow_box",
+                effect="typewriter",
+                sound="none",
+            )
+        ]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+            patch.object(
+                vd.card_text, "render_card_clip", wraps=vd.card_text.render_card_clip
+            ) as render_card_clip,
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        render_card_clip.assert_called_once_with(
+            "Inline styled",
+            "bold_yellow_box",
+            "typewriter",
+            duration=3.0,
+            font_name=None,
+            font_size=None,
+        )
+        self.assertEqual(len(captured["clips"]), 2)
+
+    def test_generate_video_falls_back_to_random_style_for_unknown_inline_style(self):
+        """marker 里打错的 style/effect 名字不能让整段视频生成失败，只应该
+        回退用随机 style/effect 并继续渲染。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            video_aspect="16:9",
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(
+                slot=1,
+                text="Typo style",
+                start_time=1.0,
+                style="not_a_real_style",
+                effect="not_a_real_effect",
+                sound="none",
+            )
+        ]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+        captured = {}
+
+        def fake_composite_video_clip(clips, **kwargs):
+            captured["clips"] = clips
+            return composited_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", side_effect=fake_composite_video_clip
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        self.assertEqual(len(captured["clips"]), 2)
+
+    def test_generate_video_uses_inline_marker_font_and_font_size(self):
+        """marker tu chon font=/font_size= (khong qua card_text_config)
+        phai duoc truyen dung xuong render_card_clip."""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            video_aspect="16:9",
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(
+                slot=1,
+                text="Custom font",
+                start_time=1.0,
+                style="bold_yellow_box",
+                effect="typewriter",
+                sound="none",
+                font="BeVietnamPro-Bold.ttf",
+                font_size=64,
+            )
+        ]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", return_value=composited_video
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+            patch.object(
+                vd.card_text, "render_card_clip", wraps=vd.card_text.render_card_clip
+            ) as render_card_clip,
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        render_card_clip.assert_called_once_with(
+            "Custom font",
+            "bold_yellow_box",
+            "typewriter",
+            duration=3.0,
+            font_name="BeVietnamPro-Bold.ttf",
+            font_size=64,
+        )
+
+    def test_generate_video_falls_back_to_default_font_for_unknown_inline_font(self):
+        """marker go sai ten font (khong ton tai file) khong duoc lam hong
+        video - phai bo qua font do va dung font mac dinh cua style."""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="",
+            video_aspect="16:9",
+        )
+        card_timings = [
+            vd.ResolvedCardTiming(
+                slot=1,
+                text="Typo font",
+                start_time=1.0,
+                style="bold_yellow_box",
+                effect="typewriter",
+                sound="none",
+                font="ThisFontDoesNotExist.ttf",
+                font_size=500,
+            )
+        ]
+
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(vd, "AudioFileClip", return_value=voice_source),
+            patch.object(
+                vd, "CompositeVideoClip", return_value=composited_video
+            ),
+            patch.object(vd, "_write_videofile_with_codec_fallback") as writer,
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+            patch.object(
+                vd.card_text, "render_card_clip", wraps=vd.card_text.render_card_clip
+            ) as render_card_clip,
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        writer.assert_called_once()
+        render_card_clip.assert_called_once_with(
+            "Typo font",
+            "bold_yellow_box",
+            "typewriter",
+            duration=3.0,
+            font_name=None,
+            font_size=None,
+        )
 
     def test_generate_video_shortens_card_duration_to_avoid_overlapping_next_card(self):
         """两张卡片时间间隔小于默认 3 秒时，前一张卡片的显示时长必须缩短到

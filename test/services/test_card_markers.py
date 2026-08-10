@@ -69,6 +69,75 @@ class TestExtractCardMarkers(unittest.TestCase):
         self.assertEqual(markers, [])
         self.assertEqual(cleaned, script)
 
+    def test_default_marker_has_no_style_effect_sound(self):
+        script = "Xin chào [card: Nội dung] các bạn."
+        _, markers = extract_card_markers(script)
+        self.assertIsNone(markers[0].style)
+        self.assertIsNone(markers[0].effect)
+        self.assertIsNone(markers[0].sound)
+
+    def test_inline_attributes_are_parsed_without_slot_number(self):
+        script = "[card style=bold_yellow_box effect=typewriter sound=whoosh: Diem nhan]"
+        _, markers = extract_card_markers(script)
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0].slot, 1)
+        self.assertEqual(markers[0].style, "bold_yellow_box")
+        self.assertEqual(markers[0].effect, "typewriter")
+        self.assertEqual(markers[0].sound, "whoosh")
+        self.assertEqual(markers[0].text, "Diem nhan")
+
+    def test_inline_attributes_are_parsed_with_slot_number(self):
+        script = "[card 3 style=gradient_pop effect=bounce: Diem nhan thu 3]"
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].slot, 3)
+        self.assertEqual(markers[0].style, "gradient_pop")
+        self.assertEqual(markers[0].effect, "bounce")
+        self.assertIsNone(markers[0].sound)
+
+    def test_attributes_are_case_insensitive_keyword_but_case_sensitive_value(self):
+        script = "[CARD STYLE=bold_yellow_box: Text]"
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].style, "bold_yellow_box")
+
+    def test_partial_attributes_only_sets_provided_ones(self):
+        script = "[card effect=rotate_in: Only effect set]"
+        _, markers = extract_card_markers(script)
+        self.assertIsNone(markers[0].style)
+        self.assertEqual(markers[0].effect, "rotate_in")
+        self.assertIsNone(markers[0].sound)
+
+    def test_unknown_attribute_keys_are_ignored(self):
+        script = "[card style=bold_yellow_box color=red: Text]"
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].style, "bold_yellow_box")
+
+    def test_font_and_font_size_attributes_are_parsed(self):
+        script = "[card font=BeVietnamPro-Bold.ttf font_size=48: Text]"
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].font, "BeVietnamPro-Bold.ttf")
+        self.assertEqual(markers[0].font_size, 48)
+        self.assertIsInstance(markers[0].font_size, int)
+
+    def test_non_numeric_font_size_is_ignored(self):
+        script = "[card font_size=abc: Text]"
+        _, markers = extract_card_markers(script)
+        self.assertIsNone(markers[0].font_size)
+
+    def test_double_quoted_text_has_quotes_stripped(self):
+        script = '[card: "Noi dung co ngoac kep"]'
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].text, "Noi dung co ngoac kep")
+
+    def test_single_quoted_text_has_quotes_stripped(self):
+        script = "[card: 'Noi dung co ngoac don']"
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].text, "Noi dung co ngoac don")
+
+    def test_unmatched_quote_is_left_untouched(self):
+        script = '[card: 6" man hinh]'
+        _, markers = extract_card_markers(script)
+        self.assertEqual(markers[0].text, '6" man hinh')
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -491,6 +492,12 @@ def tts(
             logger.error(f"Invalid piper voice name format: {voice_name}")
             return None
         return piper_tts(text, piper_voice, voice_file, voice_rate, voice_volume)
+    elif is_vieneu_voice(voice_name):
+        vieneu_voice = _extract_simple_voice_id(voice_name)
+        if vieneu_voice is None:
+            logger.error(f"Invalid VieNeu-TTS voice name format: {voice_name}")
+            return None
+        return vieneu_tts(text, vieneu_voice, voice_file, voice_rate, voice_volume)
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
 
@@ -1640,6 +1647,123 @@ def piper_tts(
     except Exception as e:
         logger.error(f"piper tts failed: {str(e)}")
         return None
+
+
+_vieneu_client = None
+
+
+def _get_cached_vieneu_client():
+    """VieNeu-TTS (https://github.com/pnnbao97/VieNeu-TTS) tai model 1 lan
+    roi dung lai cho cac lan goi sau, giong cach _get_cached_piper_voice
+    cache PiperVoice. Lan dau goi se tai model tu Hugging Face ve cache cuc
+    bo (can mang 1 lan), sau do chay hoan toan offline - khong can API key,
+    giong het cach whisper subtitle model da dung trong du an nay."""
+    global _vieneu_client
+    if _vieneu_client is None:
+        from vieneu import Vieneu
+
+        _vieneu_client = Vieneu()
+    return _vieneu_client
+
+
+def _parse_vieneu_gender(label: str) -> str:
+    parts = label.split(" — ", 1)
+    if len(parts) == 2 and parts[1].split(" · ", 1)[0].strip() == "Nam":
+        return "Male"
+    return "Female"
+
+
+def get_all_vieneu_voices() -> list[str]:
+    """Liet ke 14 giong doc tieng Viet co san cua VieNeu-TTS, dinh dang
+    ``vieneu:<ten_giong>-Female``/``-Male`` giong quy uoc cac provider khac
+    trong file nay."""
+    try:
+        client = _get_cached_vieneu_client()
+    except Exception as e:
+        logger.warning(f"failed to load VieNeu-TTS: {e}")
+        return []
+
+    voices = []
+    try:
+        for label, voice_id in client.list_preset_voices():
+            gender = _parse_vieneu_gender(label)
+            voices.append(f"vieneu:{voice_id}-{gender}")
+    except Exception as e:
+        logger.warning(f"failed to list VieNeu-TTS voices: {e}")
+        return []
+    return voices
+
+
+def is_vieneu_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("vieneu:")
+
+
+def vieneu_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """Generate speech with VieNeu-TTS (https://github.com/pnnbao97/VieNeu-TTS),
+    a local/offline neural Vietnamese TTS engine -- no network or API key
+    required after the one-time model download from Hugging Face on first
+    use (same offline-after-first-run pattern as the Whisper subtitle model
+    already used in this project).
+
+    VieNeu-TTS doesn't expose a playback-rate or volume parameter in its
+    inference API, so voice_rate/voice_volume are accepted for signature
+    parity with the other engines but not applied.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error("VieNeu-TTS text is empty")
+        return None
+
+    try:
+        client = _get_cached_vieneu_client()
+    except Exception as e:
+        logger.error(
+            f"VieNeu-TTS is not installed or failed to load ({e}). Install it "
+            f"with `uv add vieneu` (or `pip install vieneu`) to use offline "
+            f"Vietnamese voices."
+        )
+        return None
+
+    tmp_wav_path = None
+    try:
+        audio = client.infer(text, voice=voice)
+
+        fd, tmp_wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        client.save(audio, tmp_wav_path)
+
+        from pydub import AudioSegment
+
+        _configure_pydub_ffmpeg(AudioSegment)
+        final_audio = AudioSegment.from_wav(tmp_wav_path)
+
+        ensure_file_path_exists(voice_file)
+        export_format = os.path.splitext(voice_file)[1].lstrip(".").lower() or "mp3"
+        final_audio.export(voice_file, format=export_format)
+
+        audio_duration = len(final_audio) / 1000.0
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        logger.success(f"vieneu tts succeeded: {voice_file}")
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=audio_duration,
+        )
+    except Exception as e:
+        logger.error(f"vieneu tts failed: {str(e)}")
+        return None
+    finally:
+        if tmp_wav_path and os.path.exists(tmp_wav_path):
+            try:
+                os.remove(tmp_wav_path)
+            except Exception:
+                pass
 
 
 def _format_text(text: str) -> str:

@@ -1,6 +1,6 @@
 # app/services/utils/card_text/_styles.py
 import math
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -10,12 +10,25 @@ from app.services import video as video_service
 from ._primitives import render_card_box
 
 
-def minimal_white(text: str) -> np.ndarray:
-    font_path = video_service.resolve_font_path(None)
+def _resolve_card_font_path(text: str, font_name: Optional[str] = None) -> str:
+    # resolve_font_path(None) tra ve font mac dinh (STHeitiMedium.ttc), font
+    # nay thieu mot so ky tu co dau tieng Viet (vi du "Ạ") va se render ra o
+    # vuong (tofu). Dung lai co che fallback da co san cho phu de de tu dong
+    # doi sang font khac trong cung thu muc neu font (mac dinh hoac font
+    # nguoi dung chon) thieu ky tu. font_name da duoc video.py xac nhan ton
+    # tai truoc khi truyen vao day, nen ham nay khong tu kiem tra lai.
+    font_path = video_service.resolve_font_path(font_name)
+    return video_service._resolve_subtitle_font_path(font_path, text)
+
+
+def minimal_white(
+    text: str, font_name: Optional[str] = None, font_size: Optional[int] = None
+) -> np.ndarray:
+    font_path = _resolve_card_font_path(text, font_name)
     return render_card_box(
         text,
         font_path=font_path,
-        font_size=34,
+        font_size=font_size or 34,
         text_color=(20, 20, 20, 255),
         background_color=(255, 255, 255, 235),
         border_color=(210, 210, 210, 255),
@@ -24,12 +37,14 @@ def minimal_white(text: str) -> np.ndarray:
     )
 
 
-def bold_yellow_box(text: str) -> np.ndarray:
-    font_path = video_service.resolve_font_path(None)
+def bold_yellow_box(
+    text: str, font_name: Optional[str] = None, font_size: Optional[int] = None
+) -> np.ndarray:
+    font_path = _resolve_card_font_path(text, font_name)
     return render_card_box(
         text,
         font_path=font_path,
-        font_size=40,
+        font_size=font_size or 40,
         text_color=(20, 20, 20, 255),
         background_color=(255, 205, 0, 255),
         border_color=(20, 20, 20, 255),
@@ -60,12 +75,14 @@ def _gradient_background(
     return gradient
 
 
-def gradient_pop(text: str) -> np.ndarray:
-    font_path = video_service.resolve_font_path(None)
+def gradient_pop(
+    text: str, font_name: Optional[str] = None, font_size: Optional[int] = None
+) -> np.ndarray:
+    font_path = _resolve_card_font_path(text, font_name)
     box = render_card_box(
         text,
         font_path=font_path,
-        font_size=42,
+        font_size=font_size or 42,
         text_color=(255, 255, 255, 255),
         background_color=(0, 0, 0, 0),
         border_color=None,
@@ -82,12 +99,14 @@ def gradient_pop(text: str) -> np.ndarray:
     return np.asarray(composed)
 
 
-def sticky_note(text: str) -> np.ndarray:
-    font_path = video_service.resolve_font_path(None)
+def sticky_note(
+    text: str, font_name: Optional[str] = None, font_size: Optional[int] = None
+) -> np.ndarray:
+    font_path = _resolve_card_font_path(text, font_name)
     box = render_card_box(
         text,
         font_path=font_path,
-        font_size=36,
+        font_size=font_size or 36,
         text_color=(40, 40, 40, 255),
         background_color=(255, 245, 170, 255),
         border_color=None,
@@ -111,12 +130,14 @@ def _star_polygon(center, outer_radius, inner_radius, points=12):
     return coords
 
 
-def comic_burst(text: str) -> np.ndarray:
-    font_path = video_service.resolve_font_path(None)
+def comic_burst(
+    text: str, font_name: Optional[str] = None, font_size: Optional[int] = None
+) -> np.ndarray:
+    font_path = _resolve_card_font_path(text, font_name)
     box = render_card_box(
         text,
         font_path=font_path,
-        font_size=40,
+        font_size=font_size or 40,
         text_color=(20, 20, 20, 255),
         background_color=(255, 255, 255, 0),
         border_color=None,
@@ -143,7 +164,7 @@ def comic_burst(text: str) -> np.ndarray:
     return np.asarray(star_image)
 
 
-CATEGORY_STYLES: Dict[str, Callable[[str], np.ndarray]] = {
+CATEGORY_STYLES: Dict[str, Callable[..., np.ndarray]] = {
     "minimal_white": minimal_white,
     "bold_yellow_box": bold_yellow_box,
     "gradient_pop": gradient_pop,

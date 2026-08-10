@@ -30,7 +30,7 @@ def format_log_record(record):
     """
     file_path = record["file"].path
     if os.path.isabs(file_path):
-        relative_path = os.path.relpath(file_path, PROJECT_ROOT)
+        relative_path = os.path.relpath(file_path, PROJECT_ROOT).replace(os.sep, "/")
         record["file"].path = f"./{relative_path}"
 
     # 日志消息有时会包含任务文件的绝对路径。统一缩短为项目相对路径，可以

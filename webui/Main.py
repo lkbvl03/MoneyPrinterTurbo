@@ -40,7 +40,12 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
-from app.services import cache_manager, llm, video, voice, webui_task
+from app.services import cache_manager, llm, media_library, video, voice, webui_task
+from app.services.utils.card_markers import extract_card_markers
+from app.services.utils.card_text import CARD_EFFECTS, CARD_STYLES
+from app.services.utils.card_text._sounds import CARD_SOUNDS
+from app.services.utils.video_overlay_effects import OVERLAY_EFFECTS
+from app.services.utils.xfade_transitions import XFADE_TRANSITIONS
 from app.services import elevenlabs_music as elevenlabs_music_service
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
@@ -546,6 +551,8 @@ def _collect_task_summaries(limit=20):
             "state": task.get("state"),
             "cross_post_state": task.get("cross_post_state"),
             "progress": int(task.get("progress", 0) or 0),
+            "current_video_index": task.get("current_video_index"),
+            "video_count": task.get("video_count"),
             "mtime": os.path.getmtime(task_path)
             if os.path.isdir(task_path)
             else history_task.get("mtime", 0),
@@ -714,7 +721,16 @@ def _render_task_table(filtered_tasks, key_prefix):
                 row_cols[0].write(_task_state_label(task["state"], has_video))
                 row_cols[1].write(_format_task_time(task["mtime"]))
                 row_cols[2].write(_format_task_subject(task["subject"]))
-                row_cols[3].write(f"{task['progress']}%")
+                progress_text = f"{task['progress']}%"
+                current_video_index = task.get("current_video_index")
+                video_count = task.get("video_count")
+                if is_processing and current_video_index and video_count and video_count > 1:
+                    # 批量生成时单看百分比无法判断"卡住了还是在排队处理下一个"，
+                    # 明确标出第几个视频能直接回应这个疑虑。
+                    progress_text += (
+                        f" ({tr('Video Queue Position').format(current=current_video_index, total=video_count)})"
+                    )
+                row_cols[3].write(progress_text)
 
                 action_cols = row_cols[4].columns(
                     4,
@@ -877,6 +893,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "chatterbox"
     if voice.is_piper_voice(voice_name):
         return "piper"
+    if voice.is_vieneu_voice(voice_name):
+        return "vieneu"
     if voice.is_azure_v2_voice(voice_name):
         return "azure-tts-v2"
     return "azure-tts-v1"
@@ -1071,7 +1089,7 @@ def _render_brand(available_update: str | None = None):
     st.markdown(
         f"""
         <h1 class="mpt-brand">
-            <span class="mpt-brand__name">MoneyPrinterTurbo</span>
+            <span class="mpt-brand__name">Lưu Kiến Bình-0986393239</span>
             <a class="mpt-brand__version"
                href="https://github.com/harry0703/MoneyPrinterTurbo"
                target="_blank"
@@ -1343,9 +1361,18 @@ def _render_generation_task_snapshot(task_id, task):
     progress = max(0, min(100, int(task.get("progress", 0) or 0)))
     if state == const.TASK_STATE_PROCESSING:
         st.info(tr("Generating Video"))
+        progress_text = f"{tr('Task Progress')}: {progress}%"
+        current_video_index = task.get("current_video_index")
+        video_count = task.get("video_count")
+        if current_video_index and video_count and video_count > 1:
+            # 批量生成时百分比覆盖整批任务，单看百分比容易让人误以为卡住；
+            # 明确标出正在处理第几个视频，呼应用户对"看不到排队进度"的反馈。
+            progress_text += (
+                f" ({tr('Video Queue Position').format(current=current_video_index, total=video_count)})"
+            )
         st.progress(
             progress,
-            text=f"{tr('Task Progress')}: {progress}%",
+            text=progress_text,
         )
         _render_generation_logs(task_id)
         return
@@ -2224,6 +2251,117 @@ def _render_script_settings(panel, params):
                 key="video_terms",
             )
 
+            _render_card_text_panel(params)
+
+
+def _render_card_text_panel(params):
+    """Phat hien marker [card N: noi dung] / [card: noi dung] trong kich
+    ban, cho phep chon style/hieu ung/am thanh/font/co chu cho tung the,
+    xem truoc anh render thuc te, roi gop lai thanh JSON o
+    params.card_text_config (dung dinh dang ma
+    VideoParams._validate_card_text_config chap nhan)."""
+    _, markers = extract_card_markers(params.video_script or "")
+    slots = sorted({marker.slot for marker in markers})
+
+    with st.container(key="card_text_settings"):
+        with st.expander(tr("Card Text Settings"), expanded=bool(slots)):
+            st.caption(tr("Card Text Help"))
+
+            if not slots:
+                st.caption(tr("No Card Text Markers Found"))
+                params.card_text_config = None
+                return
+
+            style_options = ["random", *sorted(CARD_STYLES)]
+            effect_options = ["random", *sorted(CARD_EFFECTS)]
+            sound_options = ["auto", "none", *sorted(CARD_SOUNDS)]
+            font_options = [tr("Default Font"), *get_all_fonts()]
+
+            marker_by_slot = {marker.slot: marker for marker in markers}
+
+            config_entries = []
+            for slot in slots:
+                st.caption(f"{tr('Card')} #{slot}")
+                # Xep doc tung dong thay vi chia cot ngang - panel nay thuong
+                # nam trong 1 cot hep cua trang, chia 4 cot se lam chu bi cat
+                # cut (dac biet ten font co the rat dai, vi du
+                # "BeVietnamPro-ExtraBoldItalic.ttf").
+                style = st.selectbox(
+                    tr("Card Style"),
+                    options=style_options,
+                    key=f"card_text_style_{slot}",
+                )
+                effect = st.selectbox(
+                    tr("Card Effect"),
+                    options=effect_options,
+                    key=f"card_text_effect_{slot}",
+                )
+                sound = st.selectbox(
+                    tr("Card Sound"),
+                    options=sound_options,
+                    key=f"card_text_sound_{slot}",
+                )
+                font_choice = st.selectbox(
+                    tr("Card Font"),
+                    options=font_options,
+                    key=f"card_text_font_{slot}",
+                )
+                font_name = None if font_choice == font_options[0] else font_choice
+
+                font_size = st.slider(
+                    tr("Card Font Size"),
+                    min_value=8,
+                    max_value=200,
+                    value=40,
+                    key=f"card_text_font_size_{slot}",
+                )
+
+                entry = {
+                    "slot": slot,
+                    "style": style,
+                    "effect": effect,
+                    "sound": sound,
+                }
+                if font_name:
+                    entry["font"] = font_name
+                entry["font_size"] = font_size
+                config_entries.append(entry)
+
+                preview_style = "bold_yellow_box" if style == "random" else style
+                preview_text = marker_by_slot[slot].text
+                try:
+                    preview_rgba = CARD_STYLES[preview_style](
+                        preview_text, font_name, font_size
+                    )
+                    st.image(preview_rgba, caption=tr("Preview"))
+                except Exception as e:
+                    logger.warning(f"failed to render card text preview: {e}")
+
+            params.card_text_config = json.dumps(config_entries, ensure_ascii=False)
+
+
+def _render_media_library_panel(video_aspect):
+    """Hien thong tin kho media (da/chua gan tag) va nut quet cho thu muc
+    ung voi ti le khung hinh dang chon. Gan tag dua theo ten file/thu muc,
+    khong goi AI/API nao."""
+    directory = media_library.aspect_dir(video_aspect)
+    st.caption(tr("Media Library Folder Help"))
+    st.code(directory, language=None)
+
+    stats = media_library.library_stats(video_aspect)
+    st.caption(
+        tr("Library Status").format(
+            tagged=stats["tagged"], total=stats["total"]
+        )
+    )
+
+    if st.button(tr("Scan & Tag Library"), key=f"scan_library_{video_aspect.value}"):
+        with st.spinner(tr("Scanning Library")):
+            with config.runtime_config_lock():
+                result = media_library.scan_and_tag_library(video_aspect)
+        st.success(tr("Library Scan Result").format(**result))
+        st.rerun()
+
 
 def _render_video_settings(panel, params):
     """渲染视频设置并返回本次选择的本地素材。"""
@@ -2240,6 +2378,7 @@ def _render_video_settings(panel, params):
                 (tr("Pixabay"), "pixabay"),
                 (tr("Coverr"), "coverr"),
                 (tr("Local file"), "local"),
+                (tr("Local media library"), "local_library"),
             ]
 
             saved_video_source_name = config.app.get("video_source", "pexels")
@@ -2315,6 +2454,57 @@ def _render_video_settings(panel, params):
             )
             params.video_transition_mode = VideoTransitionMode(selected_transition_mode)
 
+            # Che do chuyen canh chuyen nghiep (48 kieu xfade cua ffmpeg) -
+            # khi bat, no thay the hoan toan video_transition_mode o tren
+            # (xem app/services/video.py: video_transition_style khac None
+            # thi bo qua video_transition_mode).
+            transition_tier_options = [
+                (tr("Basic"), "basic"),
+                (tr("Professional (xfade)"), "professional"),
+            ]
+            selected_transition_tier = stable_selectbox(
+                tr("Transition Effect Tier"),
+                options=[value for _, value in transition_tier_options],
+                default_value="basic",
+                key="video_transition_tier_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in transition_tier_options
+                )[value],
+            )
+            if selected_transition_tier == "professional":
+                xfade_style_options = ["random", *XFADE_TRANSITIONS]
+                params.video_transition_style = stable_selectbox(
+                    tr("Video Transition Style"),
+                    options=xfade_style_options,
+                    default_value="random",
+                    key="video_transition_style_select",
+                    format_func=lambda value: (
+                        tr("Random Choice") if value == "random" else value.capitalize()
+                    ),
+                )
+            else:
+                params.video_transition_style = None
+
+            # Ky xao hinh anh theo tung clip (thoi tiet, hat/khi quyen, lua,
+            # anh sang, retro/film, chuyen dong may quay - 38 hieu ung).
+            overlay_effect_options = [
+                (tr("None"), "none"),
+                (tr("Random Choice"), "random"),
+                *(
+                    (f"{spec.category.title()}: {name.replace('_', ' ').title()}", name)
+                    for name, spec in sorted(OVERLAY_EFFECTS.items())
+                ),
+            ]
+            params.video_overlay_effect = stable_selectbox(
+                tr("Video Overlay Effect"),
+                options=[value for _, value in overlay_effect_options],
+                default_value="none",
+                key="video_overlay_effect_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in overlay_effect_options
+                )[value],
+            )
+
             video_aspect_ratios = [
                 (tr("Portrait"), VideoAspect.portrait.value),
                 (tr("Landscape"), VideoAspect.landscape.value),
@@ -2336,6 +2526,9 @@ def _render_video_settings(panel, params):
                 )[value],
             )
             params.video_aspect = VideoAspect(selected_aspect_ratio)
+
+            if params.video_source == "local_library":
+                _render_media_library_panel(params.video_aspect)
 
             params.video_clip_duration = stable_selectbox(
                 tr("Clip Duration"),
@@ -2360,11 +2553,18 @@ def _render_video_settings(panel, params):
                 key=clip_speed_key,
                 help=tr("Clip Speed Help"),
             )
-            params.video_count = stable_selectbox(
+            video_count_key = localized_widget_key("video_count_select")
+            # 用户明确要求不限制批量生成数量；旧的 1~5 下拉框在此处替换为
+            # 开放式数字输入，避免恢复旧任务或 API 写入更大数值时被强制截断。
+            st.session_state[video_count_key] = max(
+                1, int(st.session_state.get(video_count_key, 1) or 1)
+            )
+            params.video_count = st.number_input(
                 tr("Number of Videos Generated Simultaneously"),
-                options=[1, 2, 3, 4, 5],
-                default_value=1,
-                key="video_count_select",
+                min_value=1,
+                step=1,
+                key=video_count_key,
+                help=tr("Number of Videos Generated Simultaneously Help"),
             )
 
             video_codec_options = [
@@ -3088,6 +3288,7 @@ def _render_audio_settings(panel, params):
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
                 ("piper", "Piper TTS (Offline)"),
+                ("vieneu", "VieNeu-TTS (Offline, Vietnamese)"),
             ]
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
@@ -3158,6 +3359,13 @@ def _render_audio_settings(panel, params):
                 # 扫描 [piper] models_dir 下的 .onnx 模型文件作为音色列表
                 _sync_piper_config_from_session_state()
                 filtered_voices = voice.get_all_piper_voices()
+            elif selected_tts_server == "vieneu":
+                # VieNeu-TTS 的 14 个内置越南语音色（首次调用会从 Hugging Face
+                # 下载模型并缓存到本进程，之后同一进程内复用，不再重复加载）。
+                with st.spinner(tr("Loading VieNeu-TTS Voices")):
+                    filtered_voices = voice.get_all_vieneu_voices()
+                if not filtered_voices:
+                    st.warning(tr("VieNeu-TTS Load Failed"))
             else:
                 # 获取Azure的声音列表
                 all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -3179,7 +3387,11 @@ def _render_audio_settings(panel, params):
                 if voice.is_elevenlabs_voice(v):
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
-                if voice.is_chatterbox_voice(v) or voice.is_piper_voice(v):
+                if (
+                    voice.is_chatterbox_voice(v)
+                    or voice.is_piper_voice(v)
+                    or voice.is_vieneu_voice(v)
+                ):
                     name = v.split(":", 1)[1] if ":" in v else v
                     return name.replace("-Female", "").replace("-Male", "")
                 return (
@@ -3391,6 +3603,15 @@ def _render_audio_settings(panel, params):
                     placeholder=tr("Piper Models Folder Placeholder"),
                 )
                 config.piper["models_dir"] = (piper_models_dir or "").strip()
+
+            # VieNeu-TTS (offline/local Vietnamese TTS) -- no settings needed,
+            # models download automatically to the Hugging Face cache on
+            # first use, then run fully offline.
+            if tts_mode_enabled and (
+                selected_tts_server == "vieneu"
+                or (voice_name and voice.is_vieneu_voice(voice_name))
+            ):
+                st.caption(tr("VieNeu-TTS Help"))
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；
             # 上传音频只需要文件和音量；无配音不再展示无效设置。
@@ -3746,7 +3967,13 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        if params.video_source not in ["pexels", "pixabay", "coverr", "local"]:
+        if params.video_source not in [
+            "pexels",
+            "pixabay",
+            "coverr",
+            "local",
+            "local_library",
+        ]:
             _remove_active_generation_task(task_id)
             st.error(tr("Please Select a Valid Video Source"))
             st.stop()

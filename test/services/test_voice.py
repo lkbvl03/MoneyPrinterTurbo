@@ -932,6 +932,128 @@ class TestVoiceService(unittest.TestCase):
         model_paths = [str(Path(tmp_dir) / f"{n}.onnx") for n in ["a", "b", "c", "d"]]
         self.assertEqual(load_calls, model_paths + [model_paths[0]])
 
+    # ---------------------------------------------------------------
+    # VieNeu-TTS (offline/local Vietnamese) TTS
+    # ---------------------------------------------------------------
+
+    def _install_fake_vieneu_module(self, infer_calls, save_calls=None, factory_calls=None):
+        """Install a fake ``vieneu`` package into sys.modules so
+        vieneu_tts()/get_all_vieneu_voices() can be exercised without the
+        real (large, model-downloading) library."""
+        import types
+
+        import numpy as np
+
+        save_calls = save_calls if save_calls is not None else []
+        factory_calls = factory_calls if factory_calls is not None else []
+
+        class _FakeVieneuClient:
+            def list_preset_voices(self):
+                return [
+                    ("Minh Đức — Nam · Bắc · Phong cách tin tức", "Minh Đức"),
+                    ("Trúc Ly — Nữ · Bắc · Phong cách tự nhiên", "Trúc Ly"),
+                ]
+
+            def infer(self, text, voice=None, style="tu_nhien", **kwargs):
+                infer_calls.append((text, voice))
+                return np.zeros(4800, dtype=np.float32)  # 0.1s of silence @ 48kHz
+
+            def save(self, audio, output_path):
+                save_calls.append(str(output_path))
+                import soundfile as sf
+
+                sf.write(str(output_path), audio, 48000)
+
+        def _fake_factory(mode="v3turbo", **kwargs):
+            factory_calls.append(mode)
+            return _FakeVieneuClient()
+
+        fake_module = types.ModuleType("vieneu")
+        fake_module.Vieneu = _fake_factory
+        return patch.dict(sys.modules, {"vieneu": fake_module})
+
+    def test_vieneu_voice_helpers(self):
+        self.assertTrue(vs.is_vieneu_voice("vieneu:Minh Đức-Male"))
+        self.assertFalse(vs.is_vieneu_voice("piper:vi_VN-vais1000-medium-Female"))
+        self.assertFalse(vs.is_vieneu_voice(""))
+        self.assertFalse(vs.is_vieneu_voice(None))
+
+    def test_get_all_vieneu_voices_parses_gender_and_formats_names(self):
+        infer_calls = []
+        with self._install_fake_vieneu_module(infer_calls), patch.object(
+            vs, "_vieneu_client", None
+        ):
+            voices = vs.get_all_vieneu_voices()
+
+        self.assertEqual(voices, ["vieneu:Minh Đức-Male", "vieneu:Trúc Ly-Female"])
+
+    def test_get_all_vieneu_voices_returns_empty_when_not_installed(self):
+        with patch.object(vs, "_vieneu_client", None), patch.dict(
+            sys.modules, {"vieneu": None}
+        ):
+            self.assertEqual(vs.get_all_vieneu_voices(), [])
+
+    def test_vieneu_client_is_cached_across_calls(self):
+        infer_calls, save_calls, factory_calls = [], [], []
+        with self._install_fake_vieneu_module(
+            infer_calls, save_calls, factory_calls
+        ), patch.object(vs, "_vieneu_client", None):
+            vs.get_all_vieneu_voices()
+            vs.get_all_vieneu_voices()
+
+        # the fake Vieneu() factory must only be invoked once -- the second
+        # call reuses the cached client instead of reloading the model.
+        self.assertEqual(len(factory_calls), 1)
+
+    def test_vieneu_tts_synthesizes_and_returns_legacy_submaker(self):
+        infer_calls, save_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voice_file = str(Path(tmp_dir) / "out.mp3")
+
+            with self._install_fake_vieneu_module(
+                infer_calls, save_calls
+            ), patch.object(vs, "_vieneu_client", None):
+                sub_maker = vs.vieneu_tts(
+                    text="Xin chào các bạn.",
+                    voice="Minh Đức",
+                    voice_file=voice_file,
+                )
+
+            self.assertIsNotNone(sub_maker)
+            self.assertTrue(getattr(sub_maker, "subs", []))
+            self.assertEqual(infer_calls, [("Xin chào các bạn.", "Minh Đức")])
+            self.assertEqual(len(save_calls), 1)
+            self.assertTrue(Path(voice_file).is_file())
+            self.assertGreater(Path(voice_file).stat().st_size, 0)
+
+    def test_vieneu_tts_returns_none_when_text_is_empty(self):
+        result = vs.vieneu_tts(text="   ", voice="Minh Đức", voice_file="unused.mp3")
+        self.assertIsNone(result)
+
+    def test_vieneu_tts_returns_none_when_vieneu_not_installed(self):
+        with patch.object(vs, "_vieneu_client", None), patch.dict(
+            sys.modules, {"vieneu": None}
+        ):
+            result = vs.vieneu_tts(text="hi", voice="Minh Đức", voice_file="unused.mp3")
+        self.assertIsNone(result)
+
+    def test_tts_dispatches_vieneu_voice_to_vieneu_tts(self):
+        infer_calls, save_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voice_file = str(Path(tmp_dir) / "out.mp3")
+            with self._install_fake_vieneu_module(
+                infer_calls, save_calls
+            ), patch.object(vs, "_vieneu_client", None):
+                sub_maker = vs.tts(
+                    text="Xin chào",
+                    voice_name="vieneu:Minh Đức-Male",
+                    voice_rate=1.0,
+                    voice_file=voice_file,
+                )
+
+            self.assertIsNotNone(sub_maker)
+            self.assertEqual(infer_calls, [("Xin chào", "Minh Đức")])
+
     def test_generate_subtitle_keeps_edge_provider_for_gemini_legacy_submaker(self):
         """
         验证 Gemini TTS 返回的 legacy 字幕结构在 edge provider 下可以直接产出

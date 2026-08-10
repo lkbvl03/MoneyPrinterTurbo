@@ -1428,6 +1428,12 @@ def generate_video(
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
+        # 提前计算 BGM 是否会真正参与混音，供卡片音效在此基础上做音量避让。
+        # 没有 BGM 时音效保持原有音量，不因为这条规则被静音；有 BGM 时按 BGM
+        # 音量的 90% 等比例跟随，音效始终比背景音乐轻，避免互相盖过。
+        bgm_enabled = bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
+        card_sound_volume = params.bgm_volume * 0.9 if bgm_enabled else 1.0
+
         card_clips = []
         card_sound_clips = []
         # CompositeVideoClip 的时长等于所有子片段 end 的最大值，所以卡片必须先按
@@ -1435,27 +1441,30 @@ def generate_video(
         # 夹紧，否则脚本末尾的标记会把成片拖长 1~3 秒，尾部只剩黑帧和悬空卡片，
         # 也会让后面按 video_clip.duration 计算的 BGM 循环时长跟着变长。
         background_duration = video_clip.duration
-        if card_timings and params.card_text_config:
-            card_slot_configs = {
-                entry["slot"]: entry for entry in json.loads(params.card_text_config)
-            }
-            # 规格约定：脚本引用了未配置的插槽时，必须回退使用“卡片 1”的配置
-            # 作为安全方案，而不是直接跳过这个标记。只有当标记引用的插槽和
-            # 插槽 1 都不在 card_text_config 里（包括 card_text_config 完全
-            # 为空的情况）时，该标记才真正被跳过，只记警告不中断整段视频。
-            # card_timings 本身已按标记在脚本中出现的先后排列（见
-            # card_markers.extract_card_markers），所以 renderable_timings
-            # 同样保持开始时间递增的顺序。
+        if card_timings:
+            # card_text_config（WebUI/CLI/API 显式传入的 JSON）优先；某个插槽
+            # 没有配置时回退用插槽 1 的配置。如果 card_text_config 完全没有
+            # 提供（例如 ContentStudio 这类只透传脚本原文的前端），则改用
+            # marker 自己内联的 style=/effect=/sound= 属性
+            # （card_markers.extract_card_markers 解析出来，见 CardMarker）。
+            # 两边都没有指定时，style/effect 用随机、sound 用 auto —— 卡片
+            # 永远会被渲染出来，不会因为没有配置而被跳过。
+            card_slot_configs = {}
+            if params.card_text_config:
+                card_slot_configs = {
+                    entry["slot"]: entry for entry in json.loads(params.card_text_config)
+                }
+
             renderable_timings = []
             for timing in card_timings:
-                slot_config = card_slot_configs.get(timing.slot) or card_slot_configs.get(1)
-                if slot_config is None:
-                    logger.warning(
-                        f"card text marker references slot {timing.slot}, which has "
-                        f"no matching entry in card_text_config and there is no slot 1 "
-                        f"to fall back to; skipping"
-                    )
-                    continue
+                explicit_config = card_slot_configs.get(timing.slot) or card_slot_configs.get(1) or {}
+                slot_config = {
+                    "style": explicit_config.get("style") or timing.style,
+                    "effect": explicit_config.get("effect") or timing.effect,
+                    "sound": explicit_config.get("sound", timing.sound),
+                    "font": explicit_config.get("font") or timing.font,
+                    "font_size": explicit_config.get("font_size") or timing.font_size,
+                }
                 renderable_timings.append((timing, slot_config))
 
             for index, (timing, slot_config) in enumerate(renderable_timings):
@@ -1487,10 +1496,64 @@ def generate_video(
                 # 约束取更小的那一个。
                 duration = min(duration, background_duration - timing.start_time)
 
-                style_name = card_text.resolve_style_name(slot_config.get("style"))
-                effect_name = card_text.resolve_effect_name(slot_config.get("effect"))
+                # style/effect/sound co the den tu marker go tay (vi du qua
+                # ContentStudio, khong di qua validator cua VideoParams), nen
+                # gia tri khong hop le phai duoc bo qua kem canh bao thay vi
+                # lam vo hieu ca video - khac voi card_text_config (da duoc
+                # schema validate truoc do).
+                style_value = slot_config.get("style")
+                if (
+                    style_value not in (None, "random")
+                    and style_value not in card_text.CARD_STYLES
+                ):
+                    logger.warning(
+                        f"card text marker for slot {timing.slot} has unknown "
+                        f"style '{style_value}'; using a random style instead"
+                    )
+                    style_value = None
+                style_name = card_text.resolve_style_name(style_value)
+
+                effect_value = slot_config.get("effect")
+                if (
+                    effect_value not in (None, "random")
+                    and effect_value not in card_text.CARD_EFFECTS
+                ):
+                    logger.warning(
+                        f"card text marker for slot {timing.slot} has unknown "
+                        f"effect '{effect_value}'; using a random effect instead"
+                    )
+                    effect_value = None
+                effect_name = card_text.resolve_effect_name(effect_value)
+
+                # font/font_size cung co the den tu marker go tay, tuong tu
+                # style/effect - phai kiem tra ton tai/hop le truoc khi dua
+                # vao render_card_clip(), khong thi mot font sai ten se lam
+                # loi ca video thay vi chi rieng tam the do.
+                font_value = slot_config.get("font")
+                if font_value and not os.path.isfile(resolve_font_path(font_value)):
+                    logger.warning(
+                        f"card text marker for slot {timing.slot} has unknown "
+                        f"font '{font_value}'; using the default font instead"
+                    )
+                    font_value = None
+
+                font_size_value = slot_config.get("font_size")
+                if font_size_value is not None and not (
+                    isinstance(font_size_value, int) and 8 <= font_size_value <= 200
+                ):
+                    logger.warning(
+                        f"card text marker for slot {timing.slot} has invalid "
+                        f"font_size '{font_size_value}'; using the style's default size"
+                    )
+                    font_size_value = None
+
                 card_clip = card_text.render_card_clip(
-                    timing.text, style_name, effect_name, duration=duration
+                    timing.text,
+                    style_name,
+                    effect_name,
+                    duration=duration,
+                    font_name=font_value,
+                    font_size=font_size_value,
                 )
                 card_clip = card_clip.with_start(timing.start_time)
                 card_y = video_height * _CARD_VERTICAL_CENTER_RATIO - card_clip.h / 2
@@ -1498,25 +1561,35 @@ def generate_video(
                 card_clips.append(card_clip)
 
                 effect_group = card_text.EFFECT_GROUPS[effect_name]
+                sound_value = slot_config.get("sound") or "auto"
+                allowed_sounds = set(card_text_sounds.CARD_SOUNDS) | {"auto", "none"}
+                if sound_value not in allowed_sounds:
+                    logger.warning(
+                        f"card text marker for slot {timing.slot} has unknown "
+                        f"sound '{sound_value}'; using auto instead"
+                    )
+                    sound_value = "auto"
                 sound_name = card_text_sounds.resolve_sound_name(
-                    slot_config.get("sound", "auto"), effect_group
+                    sound_value, effect_group
                 )
                 if sound_name is not None:
                     sound_array = card_text_sounds.CARD_SOUNDS[sound_name](
                         card_clip.duration
                     )
-                    sound_clip = AudioArrayClip(
-                        sound_array.reshape(-1, 1), fps=card_text_sounds.SAMPLE_RATE
-                    ).with_start(timing.start_time)
+                    sound_clip = (
+                        AudioArrayClip(
+                            sound_array.reshape(-1, 1),
+                            fps=card_text_sounds.SAMPLE_RATE,
+                        )
+                        .with_start(timing.start_time)
+                        .with_effects([afx.MultiplyVolume(card_sound_volume)])
+                    )
                     card_sound_clips.append(sound_clip)
 
         if card_clips:
             video_clip = CompositeVideoClip([video_clip, *card_clips])
             clip_stack.callback(video_clip.close)
 
-        bgm_enabled = bgm_service.should_use_bgm(
-            params.bgm_type, params.bgm_volume
-        )
         if not bgm_enabled and params.bgm_type:
             # 所有 BGM 来源共用这一条短路规则。音量不大于 0 时不能解析随机或
             # 自定义文件，也不能加载提供商返回的文件，避免无意义的 IO 和混音。
@@ -1585,6 +1658,26 @@ def generate_video(
         return bgm_mix_succeeded
 
 
+def image_to_zoom_clip(image_path: str, clip_duration: int) -> str:
+    """Render a still image into a slow zoom-in video clip, return the mp4 path.
+
+    Shared by preprocess_video()'s image handling and the local media
+    library (app/services/media_library.py) so both convert images to
+    video clips the exact same way.
+    """
+    clip = ImageClip(image_path).with_duration(clip_duration).with_position("center")
+    # Zoom effect: scales from 100% up to 100% + 3%/sec over clip_duration.
+    zoom_clip = clip.resized(
+        lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
+    )
+    final_clip = CompositeVideoClip([zoom_clip])
+    video_file = f"{image_path}.mp4"
+    final_clip.write_videofile(video_file, fps=30, logger=None)
+    close_clip(clip)
+    close_clip(final_clip)
+    return video_file
+
+
 def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
     # WebUI 在某些二次生成场景下可能传入空素材列表，这里直接返回空结果，避免抛出 NoneType 异常。
     if not materials:
@@ -1647,32 +1740,10 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
 
             if ext in const.FILE_TYPE_IMAGES:
                 logger.info(f"processing image: {material_source_path}")
-                # 探测尺寸时已经打开过一次素材，这里先释放探测句柄，再重新创建用于导出的图片 clip。
+                # 探测尺寸时已经打开过一次素材，这里先释放探测句柄，再交给共享的
+                # image_to_zoom_clip() 生成导出用的图片 clip。
                 close_clip(clip)
-                # Create an image clip and set its duration to 3 seconds
-                clip = (
-                    ImageClip(material_source_path)
-                    .with_duration(clip_duration)
-                    .with_position("center")
-                )
-                # Apply a zoom effect using the resize method.
-                # A lambda function is used to make the zoom effect dynamic over time.
-                # The zoom effect starts from the original size and gradually scales up to 120%.
-                # t represents the current time, and clip.duration is the total duration of the clip (3 seconds).
-                # Note: 1 represents 100% size, so 1.2 represents 120% size.
-                zoom_clip = clip.resized(
-                    lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
-                )
-
-                # Optionally, create a composite video clip containing the zoomed clip.
-                # This is useful when you want to add other elements to the video.
-                final_clip = CompositeVideoClip([zoom_clip])
-
-                # Output the video to a file.
-                video_file = f"{material_source_path}.mp4"
-                final_clip.write_videofile(video_file, fps=30, logger=None)
-                close_clip(clip)
-                close_clip(final_clip)
+                video_file = image_to_zoom_clip(material_source_path, clip_duration)
                 material.url = video_file
                 logger.success(f"image processed: {video_file}")
             else:

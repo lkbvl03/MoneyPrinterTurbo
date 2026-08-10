@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 import threading
 from typing import List
 from urllib.parse import urlencode
@@ -9,7 +10,9 @@ from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
+from app.models import const
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
+from app.services import media_library
 from app.utils import utils
 
 # Thread-safe counter for API key rotation
@@ -241,6 +244,59 @@ def search_videos_coverr(
     return []
 
 
+def search_videos_local_library(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[MaterialInfo]:
+    """Tim trong kho anh/video local (da duoc AI gan tag qua
+    media_library.scan_and_tag_library) thay vi goi API ben ngoai."""
+    return media_library.search_local_library(
+        search_term=search_term,
+        minimum_duration=minimum_duration,
+        video_aspect=video_aspect,
+    )
+
+
+def save_local_library_material(source_path: str, save_dir: str = "") -> str:
+    """Dua 1 file tu kho media local vao thu muc material cua task, dong
+    vai tro giong save_video() nhung khong can tai qua HTTP vi file da co
+    san tren dia. Anh duoc chuyen thanh clip zoom (dung chung logic voi
+    video_source=local, xem video.image_to_zoom_clip) truoc khi dua vao,
+    video thi copy thang."""
+    if not save_dir:
+        save_dir = utils.storage_dir("cache_videos")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    video_id = f"lib-{utils.md5(source_path)}"
+    video_path = os.path.join(save_dir, f"{video_id}.mp4")
+    if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+        return video_path
+
+    ext = utils.parse_extension(source_path)
+    if ext in const.FILE_TYPE_IMAGES:
+        import tempfile
+
+        from app.services.video import image_to_zoom_clip
+
+        # Chuyen doi tren 1 ban sao tam, tranh sinh file .mp4 lac vao ngay
+        # trong thu muc kho media (se bi scan_and_tag_library hieu nham
+        # thanh 1 media item moi trong lan quet sau).
+        tmp_dir = tempfile.mkdtemp(prefix="media_library_")
+        try:
+            tmp_image_path = os.path.join(tmp_dir, os.path.basename(source_path))
+            shutil.copy2(source_path, tmp_image_path)
+            zoom_source = image_to_zoom_clip(tmp_image_path, clip_duration=4)
+            shutil.copy2(zoom_source, video_path)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    else:
+        shutil.copy2(source_path, video_path)
+
+    return video_path
+
+
 def save_video(video_url: str, save_dir: str = "") -> str:
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
@@ -316,6 +372,8 @@ def download_videos(
         search_videos = search_videos_pixabay
     elif source == "coverr":
         search_videos = search_videos_coverr
+    elif source == "local_library":
+        search_videos = search_videos_local_library
 
     material_directory = config.app.get("material_directory", "").strip()
     if material_directory == "task":
@@ -364,9 +422,7 @@ def download_videos(
     for item in valid_video_items:
         try:
             logger.info(f"downloading video: {item.url}")
-            saved_video_path = save_video(
-                video_url=item.url, save_dir=material_directory
-            )
+            saved_video_path = _save_material(item, material_directory)
             if saved_video_path:
                 logger.info(f"video saved: {saved_video_path}")
                 video_paths.append(saved_video_path)
@@ -381,6 +437,14 @@ def download_videos(
             logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
     logger.success(f"downloaded {len(video_paths)} videos")
     return video_paths
+
+
+def _save_material(item: MaterialInfo, save_dir: str) -> str:
+    """Dispatch ve save_video() (tai HTTP) hoac save_local_library_material()
+    (copy tu dia) tuy theo item den tu nguon nao."""
+    if item.provider == "local_library":
+        return save_local_library_material(source_path=item.url, save_dir=save_dir)
+    return save_video(video_url=item.url, save_dir=save_dir)
 
 
 def _download_videos_by_script_order(
@@ -445,9 +509,7 @@ def _download_videos_by_script_order(
                 logger.info(
                     f"downloading ordered video for '{search_term}': {item.url}"
                 )
-                saved_video_path = save_video(
-                    video_url=item.url, save_dir=material_directory
-                )
+                saved_video_path = _save_material(item, material_directory)
                 if saved_video_path:
                     logger.info(f"video saved: {saved_video_path}")
                     video_paths.append(saved_video_path)

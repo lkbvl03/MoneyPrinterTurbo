@@ -34,6 +34,11 @@ class ResolvedCardTiming:
     slot: int
     text: str
     start_time: float
+    style: Optional[str] = None
+    effect: Optional[str] = None
+    sound: Optional[str] = None
+    font: Optional[str] = None
+    font_size: Optional[int] = None
 
 
 def _flatten_whisper_words(segments):
@@ -98,7 +103,16 @@ def _resolve_card_marker_timestamps(
         else:
             start_time = marker.anchor_word_index * seconds_per_word
         results.append(
-            ResolvedCardTiming(slot=marker.slot, text=marker.text, start_time=start_time)
+            ResolvedCardTiming(
+                slot=marker.slot,
+                text=marker.text,
+                start_time=start_time,
+                style=marker.style,
+                effect=marker.effect,
+                sound=marker.sound,
+                font=marker.font,
+                font_size=marker.font_size,
+            )
         )
     return results
 

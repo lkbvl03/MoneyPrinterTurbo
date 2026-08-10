@@ -220,6 +220,18 @@ class VideoParams(BaseModel):
                     f"{', '.join(sorted(allowed_sounds))}"
                 )
 
+            font = entry.get("font")
+            if font is not None and (not isinstance(font, str) or not font.strip()):
+                raise ValueError("card_text_config 'font' must be a non-empty string")
+
+            font_size = entry.get("font_size")
+            if font_size is not None and (
+                not isinstance(font_size, int) or not (8 <= font_size <= 200)
+            ):
+                raise ValueError(
+                    "card_text_config 'font_size' must be an integer between 8 and 200"
+                )
+
         return value
 
 

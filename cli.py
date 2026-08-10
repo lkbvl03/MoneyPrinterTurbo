@@ -225,6 +225,20 @@ def _card_text_config(value: str) -> str:
                 f"card-text-config 'sound' must be one of: {allowed}"
             )
 
+        font = entry.get("font")
+        if font is not None and (not isinstance(font, str) or not font.strip()):
+            raise argparse.ArgumentTypeError(
+                "card-text-config 'font' must be a non-empty string"
+            )
+
+        font_size = entry.get("font_size")
+        if font_size is not None and (
+            not isinstance(font_size, int) or not (8 <= font_size <= 200)
+        ):
+            raise argparse.ArgumentTypeError(
+                "card-text-config 'font_size' must be an integer between 8 and 200"
+            )
+
     return normalized
 
 
@@ -325,8 +339,13 @@ Output and exit status:
     material_group.add_argument(
         "--video-source",
         default="pexels",
-        choices=["pexels", "pixabay", "coverr", "local"],
-        help="video material provider; online providers require matching API keys in config.toml",
+        choices=["pexels", "pixabay", "coverr", "local", "local_library"],
+        help=(
+            "video material provider; online providers require matching API keys "
+            "in config.toml. 'local' uses --video-materials directly; "
+            "'local_library' searches storage/media_library/<aspect>/ by "
+            "filename/folder name (no API key needed)"
+        ),
     )
     material_group.add_argument(
         "--video-materials",

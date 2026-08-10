@@ -78,6 +78,26 @@ class TestRenderCardClip(unittest.TestCase):
         self.addCleanup(clip.close)
         self.assertAlmostEqual(clip.duration, 1.0, places=2)
 
+    def test_font_name_and_font_size_are_forwarded_to_the_style(self):
+        captured = {}
+
+        def fake_style(text, font_name=None, font_size=None):
+            captured["args"] = (text, font_name, font_size)
+            import numpy as np
+
+            return np.zeros((10, 10, 4), dtype=np.uint8)
+
+        with patch.object(ct, "CARD_STYLES", {"fake": fake_style}):
+            clip = ct.render_card_clip(
+                "Test",
+                "fake",
+                "bounce",
+                font_name="BeVietnamPro-Bold.ttf",
+                font_size=64,
+            )
+        self.addCleanup(clip.close)
+        self.assertEqual(captured["args"], ("Test", "BeVietnamPro-Bold.ttf", 64))
+
 
 if __name__ == "__main__":
     unittest.main()
