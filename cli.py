@@ -158,6 +158,18 @@ def _overlay_effect(value: str) -> str:
     return normalized
 
 
+def _output_filename(value: str) -> str:
+    # 与 schema.py 的 _validate_output_filename 保持一致：这只是文件名（不带
+    # 扩展名），不是路径，必须拒绝路径分隔符和 Windows 保留字符。
+    normalized = value.strip()
+    invalid_chars = set('/\\:*?"<>|')
+    if any(ch in invalid_chars for ch in normalized):
+        raise argparse.ArgumentTypeError(
+            'output-filename must not contain path separators or any of: / \\ : * ? " < > |'
+        )
+    return normalized
+
+
 def _card_text_config(value: str) -> str:
     # 延迟导入的原因和 _overlay_effect 一样：避免 `cli.py -h` 也要初始化卡片
     # 目录模块。
@@ -431,12 +443,40 @@ Output and exit status:
         ),
     )
     video_group.add_argument(
+        "--image-clip-duration",
+        type=_positive_int,
+        default=None,
+        help=(
+            "how long each uploaded image stays on screen, in seconds, at least 1 "
+            "(default: 4); independent of --video-clip-duration, only affects images"
+        ),
+    )
+    video_group.add_argument(
         "--match-materials-to-script",
         default=None,
         action=argparse.BooleanOptionalAction,
         help=(
             "preserve script keyword order while selecting and concatenating materials "
             "(default: disabled)"
+        ),
+    )
+    video_group.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=(
+            "extra directory to also copy the final video(s) into, created if "
+            "missing (default: only storage/tasks/<task_id>)"
+        ),
+    )
+    video_group.add_argument(
+        "--output-filename",
+        type=_output_filename,
+        default=None,
+        help=(
+            "base filename (no extension, no path) for the extra copy; a "
+            "-<index> suffix is appended automatically when --video-count > 1 "
+            "(default: final-<index>)"
         ),
     )
     video_group.add_argument(
@@ -689,6 +729,8 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_source": args.video_source,
         "video_materials": video_materials,
         "video_count": args.video_count,
+        "output_dir": args.output_dir,
+        "output_filename": args.output_filename,
         "video_aspect": args.video_aspect,
         "voice_name": args.voice_name,
         "subtitle_enabled": args.subtitle_enabled,
@@ -705,6 +747,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_overlay_effect",
         "card_text_config",
         "video_clip_duration",
+        "image_clip_duration",
         "match_materials_to_script",
         "n_threads",
         "voice_volume",

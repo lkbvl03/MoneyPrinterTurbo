@@ -5,10 +5,14 @@ from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import List, Optional, Tuple
 
-try:
-    from faster_whisper import WhisperModel
-except ImportError:
-    WhisperModel = None
+# faster_whisper 的顶层 import 会连带加载 ctranslate2/onnxruntime 等原生库，
+# 实测单独 import 就要 10+ 秒——绝大多数任务默认走 edge 字幕，根本不会用到
+# Whisper，却要为它多等这十几秒启动时间。这里改成首次真正调用 create() 时才
+# 惰性 import，用 _UNRESOLVED 哨兵和模块级 WhisperModel 区分"还没检查过"与
+# "确认不可用"，同时保留下面测试用 patch.object(subtitle, "WhisperModel", ...)
+# 直接换成 None/假类来模拟这两种状态的既有写法。
+_UNRESOLVED = object()
+WhisperModel = _UNRESOLVED
 from loguru import logger
 
 from app.config import config
@@ -167,7 +171,14 @@ def create(
     video_script: str = "",
     card_markers: Optional[List[CardMarker]] = None,
 ):
-    global model
+    global model, WhisperModel
+    if WhisperModel is _UNRESOLVED:
+        try:
+            from faster_whisper import WhisperModel as _WhisperModel
+        except ImportError:
+            WhisperModel = None
+        else:
+            WhisperModel = _WhisperModel
     if WhisperModel is None:
         logger.warning("faster_whisper not available, skipping whisper subtitle generation")
         return ""

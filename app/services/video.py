@@ -1387,10 +1387,6 @@ def generate_video(
             _clip = _clip.with_position(("center", custom_y))
         else:  # center
             _clip = _clip.with_position(("center", "center"))
-        logger.warning(
-        f"[DEBUG SUBTITLE] position={params.subtitle_position!r}, "
-        f"clip_size=({_clip.w}x{_clip.h}), video_size=({video_width}x{video_height})"
-    )
         return _clip
 
     # MoviePy 的 CompositeAudioClip.close() 不会关闭子 AudioFileClip。这里用

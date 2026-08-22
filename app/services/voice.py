@@ -2003,13 +2003,22 @@ def create_subtitle(
     3. 生成新的字幕文件
     """
     text = _format_text(text)
-    script_lines = (
-        utils.split_string_by_punctuations_and_length(text, max_line_length)
-        if max_line_length
-        else utils.split_string_by_punctuations(text)
-    )
+    has_edge_cues = bool(getattr(sub_maker, "cues", None))
+    if has_edge_cues:
+        script_lines = (
+            utils.split_string_by_punctuations_and_length(text, max_line_length)
+            if max_line_length
+            else utils.split_string_by_punctuations(text)
+        )
+    else:
+        # Piper/VieNeu/Gemini/SiliconFlow 等没有逐词边界的 TTS 都靠
+        # populate_legacy_submaker_with_full_text() 按标点整句填充 subs/offset，
+        # 不支持再叠加字符数上限。这里必须用同样的整句切分方式对齐，否则累计
+        # 文本永远匹配不上更短的 max_line_length 分段，导致整份字幕生成失败
+        # （sub_items 数量和 script_lines 对不上，函数直接放弃写文件）。
+        script_lines = utils.split_string_by_punctuations(text)
     try:
-        if hasattr(sub_maker, "cues") and sub_maker.cues:
+        if has_edge_cues:
             sub_items = _build_subtitle_items_from_edge_cues(sub_maker, script_lines)
         else:
             sub_items = _build_subtitle_items_from_legacy_submaker(

@@ -1091,6 +1091,54 @@ class TestVoiceService(unittest.TestCase):
             self.assertIn("Gemini subtitle generation should work now", subtitle_content)
             self.assertIn("Testing multiple lines", subtitle_content)
 
+    def test_generate_subtitle_with_legacy_submaker_and_max_line_length(self):
+        """
+        复现真实 bug：短视频 (9:16) 的 max_line_length 会按字符数把脚本切得比
+        populate_legacy_submaker_with_full_text() 的整句切分更细。两边切分方式
+        不一致时，Piper/VieNeu/Gemini 等 legacy submaker 的累计文本永远对不上
+        更短的目标行，导致 sub_items 数量和 script_lines 对不上，字幕整个生成
+        失败（用户表现为“视频生成成功但完全没有字幕”）。
+        """
+        script = (
+            "Tại sao dòng chữ chỉ còn hai sản phẩm luôn khiến tim bạn đập nhanh hơn. "
+            "Não người không xử lý thông tin một cách trung thực. "
+            "Nó xử lý theo thứ mà nó sợ mất. "
+            "Và điều này nghe hơi lạ nhưng não hoàn toàn có thể tự vẽ ra một sự thiếu "
+            "hụt không hề tồn tại."
+        )
+        sub_maker = vs.populate_legacy_submaker_with_full_text(
+            vs.ensure_legacy_submaker_fields(vs.SubMaker()),
+            script,
+            12.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            task_service.config,
+            "app",
+            dict(task_service.config.app, subtitle_provider="edge"),
+        ), patch("app.services.subtitle.create") as whisper_create, patch(
+            "app.utils.utils.task_dir",
+            lambda tid="": str(Path(tmp_dir) / tid) if tid else str(Path(tmp_dir)),
+        ):
+            task_id = "legacy-submaker-short-form-task"
+            Path(tmp_dir, task_id).mkdir(parents=True, exist_ok=True)
+            subtitle_path, _card_timings = task_service.generate_subtitle(
+                task_id=task_id,
+                params=type(
+                    "Params", (), {"subtitle_enabled": True, "video_aspect": "9:16"}
+                )(),
+                video_script=script,
+                sub_maker=sub_maker,
+                audio_file="",
+            )
+
+            self.assertTrue(subtitle_path.endswith("subtitle.srt"))
+            self.assertTrue(Path(subtitle_path).exists())
+            self.assertFalse(whisper_create.called)
+            subtitle_content = Path(subtitle_path).read_text(encoding="utf-8")
+            self.assertIn("Tại sao dòng chữ", subtitle_content)
+            self.assertIn("tồn tại", subtitle_content)
+
     def test_script_split_keeps_thousand_separator_comma(self):
         """
         Edge TTS 会把 "1,000 years" 作为连续文本返回。脚本断句时不能把

@@ -84,10 +84,20 @@ class VideoParams(BaseModel):
     video_transition_style: Optional[str] = None
     video_overlay_effect: Optional[str] = None
     video_clip_duration: Optional[int] = 7
+    # 图片素材（上传/本地图库）用缩放动画展示，和下载素材的最大播放时长语义不同：
+    # 静态图配文案朗读时常常需要停留更久，不应该被 video_clip_duration 的短时长
+    # 上限捆绑。独立字段、无上限，默认值与旧行为一致（原来图片也是走
+    # video_clip_duration，默认 7；这里改用图片素材原本更常见的 4 秒默认值）。
+    image_clip_duration: Optional[int] = Field(default=4, ge=1)
     card_text_config: Optional[str] = None
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
     video_count: Optional[int] = 1
+    # 批量生成多个视频时，用户需要自己指定成片额外导出到哪个目录、用什么文件名，
+    # 而不是只能在 storage/tasks/<task_id> 里用内部 UUID 目录翻找。留空则不导出，
+    # 完全保持原有行为；两者互相独立，只设置其中一个也生效。
+    output_dir: Optional[str] = None
+    output_filename: Optional[str] = None
 
     video_source: Optional[str] = "pexels"
     video_materials: Optional[List[MaterialInfo]] = (
@@ -149,6 +159,32 @@ class VideoParams(BaseModel):
         if value not in OVERLAY_EFFECTS:
             allowed = ", ".join(("none", "random", *sorted(OVERLAY_EFFECTS)))
             raise ValueError(f"video_overlay_effect must be one of: {allowed}")
+        return value
+
+    @field_validator("output_dir")
+    @classmethod
+    def _validate_output_dir(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("output_filename")
+    @classmethod
+    def _validate_output_filename(cls, value: Optional[str]) -> Optional[str]:
+        # 只是最终文件名（不带扩展名），不是路径，所以必须拒绝路径分隔符和
+        # Windows 保留字符，避免用户输入被拼接进文件系统调用时逃出目标目录
+        # 或在 Windows 上创建失败。
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        invalid_chars = set('/\\:*?"<>|')
+        if any(ch in invalid_chars for ch in value):
+            raise ValueError(
+                'output_filename must not contain path separators or any of: / \\ : * ? " < > |'
+            )
         return value
 
     @field_validator("card_text_config")

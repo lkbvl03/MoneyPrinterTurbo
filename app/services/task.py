@@ -1,6 +1,7 @@
 import math
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -294,6 +295,31 @@ def generate_script(task_id, params):
     return video_script
 
 
+def _fallback_terms_from_script(
+    video_subject: str, video_script: str, amount: int
+) -> list:
+    """Khong goi AI: rut chu de va cac cau trong kich ban lam tu khoa tim
+    kiem Pexels/Pixabay/Coverr, giu tinh nang nay hoat dong doc lap khong
+    can cau hinh API key nao (chi dung khi khong co tu khoa nguoi dung nhap
+    va khong co LLM provider nao kha dung/thanh cong)."""
+    terms = []
+    subject = (video_subject or "").strip()
+    if subject:
+        terms.append(subject)
+
+    for sentence in utils.split_string_by_punctuations(video_script or ""):
+        cleaned = sentence.strip()
+        if not cleaned:
+            continue
+        # Gioi han do dai moi cau lam 1 term ngan gon; API tim kiem stock
+        # video thuong tra ve it/khong co ket qua voi query qua dai.
+        terms.append(cleaned[:60])
+        if len(terms) >= amount:
+            break
+
+    return terms[:amount]
+
+
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
@@ -301,12 +327,24 @@ def generate_terms(task_id, params, video_script):
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
         # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
         # 无法改善“后面内容的画面提前出现”的问题。
+        amount = 8 if params.match_materials_to_script else 5
         video_terms = llm.generate_terms(
             video_subject=params.video_subject,
             video_script=video_script,
-            amount=8 if params.match_materials_to_script else 5,
+            amount=amount,
             match_script_order=params.match_materials_to_script,
         )
+        if not video_terms:
+            # 未配置 LLM Provider 或调用失败时，不能让整条任务因此失败——
+            # 用户明确要求这条路径也必须能在没有任何 API key 的情况下工作。
+            # 直接从脚本原文提取关键词作为兜底，保持素材搜索仍然可用。
+            logger.warning(
+                "no LLM-generated video terms available; falling back to "
+                "terms derived directly from the script"
+            )
+            video_terms = _fallback_terms_from_script(
+                params.video_subject, video_script, amount
+            )
     else:
         if isinstance(video_terms, str):
             video_terms = [term.strip() for term in re.split(r"[,，]", video_terms)]
@@ -643,7 +681,7 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
+            materials=params.video_materials, clip_duration=params.image_clip_duration
         )
         if not materials:
             _mark_task_failed(
@@ -679,6 +717,37 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             )
             return None
         return downloaded_videos
+
+
+def _export_final_video_copy(final_video_path: str, params: VideoParams, index: int) -> None:
+    """把成片另外复制一份到用户指定的目录/文件名。
+
+    批量生成时视频只会落在 storage/tasks/<task_id> 内部由 UUID 命名的目录里，
+    用户很难在几十个任务里翻找出自己要的那个。这里只做“额外导出”，原有产物
+    和任务管理（删除/重新生成/播放）依赖的路径完全不变；导出失败只记警告，
+    不能让一个坏路径拖垮已经生成好的视频。
+    """
+    if not params.output_dir and not params.output_filename:
+        return
+    if not os.path.isfile(final_video_path):
+        return
+
+    dest_dir = params.output_dir or os.path.dirname(final_video_path)
+    base_name = params.output_filename or f"final-{index}"
+    # 多个视频若共用同一个自定义文件名，必须加序号，否则后一个会覆盖前一个。
+    if params.video_count and params.video_count > 1:
+        base_name = f"{base_name}-{index}"
+    ext = os.path.splitext(final_video_path)[1] or ".mp4"
+    dest_path = os.path.join(dest_dir, f"{base_name}{ext}")
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(final_video_path, dest_path)
+        logger.info(f"exported final video copy: {final_video_path} -> {dest_path}")
+    except OSError as exc:
+        logger.warning(
+            f"failed to export final video to custom path: dest={dest_path}, error={exc}"
+        )
 
 
 def generate_final_videos(
@@ -796,6 +865,8 @@ def generate_final_videos(
                     "video_index": index,
                 }
             )
+
+        _export_final_video_copy(final_video_path, params, index)
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(

@@ -56,7 +56,11 @@ from app.utils import utils
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
-    page_icon="🤖",
+    # Logo rieng, khong dung emoji mac dinh: khi mo bang trinh duyet o che
+    # do "app" (xem Khoi-Dong-An-MoneyPrinterTurbo.vbs), icon nay hien tren
+    # taskbar/tieu de cua so, giup phan biet ro voi icon cua chinh trinh
+    # duyet thay vi bi nham lan.
+    page_icon=os.path.join(utils.resource_dir("icons"), "app_icon_256.png"),
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
@@ -946,6 +950,9 @@ def _apply_pending_task_restore():
         "video_clip_duration_select", params.get("video_clip_duration", 7)
     )
     _set_stable_widget_value(
+        "image_clip_duration_input", params.get("image_clip_duration", 4)
+    )
+    _set_stable_widget_value(
         "video_clip_speed_slider",
         # API 可以写入超过 WebUI 范围的速度，任务生成阶段会安全归一化，但
         # 历史记录仍可能保留原值。恢复任务前再次归一化，避免给 Streamlit
@@ -953,6 +960,8 @@ def _apply_pending_task_restore():
         utils.normalize_clip_speed(params.get("video_clip_speed", 1.0)),
     )
     _set_stable_widget_value("video_count_select", params.get("video_count", 1))
+    st.session_state["output_dir_input"] = params.get("output_dir") or ""
+    st.session_state["output_filename_input"] = params.get("output_filename") or ""
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
     )
@@ -2537,6 +2546,17 @@ def _render_video_settings(panel, params):
                 key="video_clip_duration_select",
                 help=tr("Clip Duration Help"),
             )
+            image_clip_duration_key = localized_widget_key("image_clip_duration_input")
+            st.session_state[image_clip_duration_key] = max(
+                1, int(st.session_state.get(image_clip_duration_key, 4) or 4)
+            )
+            params.image_clip_duration = st.number_input(
+                tr("Image Duration"),
+                min_value=1,
+                step=1,
+                key=image_clip_duration_key,
+                help=tr("Image Duration Help"),
+            )
             clip_speed_key = localized_widget_key("video_clip_speed_slider")
             # session_state 可能来自旧任务、API 参数或旧版页面状态。控件创建前
             # 统一归一化，既保留合法选择，也确保 slider 始终收到 0.5～2.0
@@ -2566,6 +2586,29 @@ def _render_video_settings(panel, params):
                 key=video_count_key,
                 help=tr("Number of Videos Generated Simultaneously Help"),
             )
+
+            params.output_dir = (
+                st.text_input(
+                    tr("Video Output Folder"),
+                    key="output_dir_input",
+                    help=tr("Video Output Folder Help"),
+                ).strip()
+                or None
+            )
+            raw_output_filename = st.text_input(
+                tr("Video Output Filename"),
+                key="output_filename_input",
+                help=tr("Video Output Filename Help"),
+            ).strip()
+            if raw_output_filename and any(
+                ch in '/\\:*?"<>|' for ch in raw_output_filename
+            ):
+                # 提前在 UI 里校验，而不是等生成完成后导出复制才失败——那时
+                # 用户已经等了几分钟，只能在日志里发现文件名被跳过。
+                st.warning(tr("Video Output Filename Invalid"))
+                params.output_filename = None
+            else:
+                params.output_filename = raw_output_filename or None
 
             video_codec_options = [
                 (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),

@@ -88,6 +88,32 @@ class TestTaskService(unittest.TestCase):
             custom_system_prompt="Only write short narration.",
         )
 
+    def test_get_video_materials_uses_image_clip_duration_not_video_clip_duration(self):
+        """
+        本地图片素材的展示时长必须走独立的 image_clip_duration，不能再复用
+        video_clip_duration（下载素材的最大播放时长），否则用户调大图片时长
+        会被这个更短的上限捆绑住。
+        """
+        params = VideoParams(
+            video_subject="test",
+            video_source="local",
+            video_materials=[MaterialInfo(provider="local", url="photo.png", duration=0)],
+            video_clip_duration=7,
+            image_clip_duration=20,
+        )
+
+        with patch.object(
+            tm.video, "preprocess_video", return_value=[]
+        ) as preprocess_video:
+            tm.get_video_materials(
+                task_id="image-duration-task",
+                params=params,
+                video_terms=None,
+                audio_duration=5,
+            )
+
+        self.assertEqual(preprocess_video.call_args.kwargs["clip_duration"], 20)
+
     def test_generate_final_videos_forwards_clip_speed(self):
         """任务编排层必须把用户选择的画面速度传给视频合成服务。"""
         params = VideoParams(
@@ -163,6 +189,135 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(
             combine_videos.call_args.kwargs["video_overlay_effect"], "rain_light"
         )
+
+    def test_generate_final_videos_exports_copy_to_custom_dir_and_filename(self):
+        """用户指定输出目录/文件名时，成片必须额外复制一份到那里。"""
+        task_id = "export-custom-path-task"
+        task_dir = utils.task_dir(task_id)
+        export_dir = tempfile.mkdtemp()
+        params = VideoParams(
+            video_subject="test",
+            video_count=1,
+            output_dir=export_dir,
+            output_filename="my-video",
+        )
+
+        def _fake_generate_video(**kwargs):
+            with open(kwargs["output_file"], "wb") as f:
+                f.write(b"fake video bytes")
+            return True
+
+        try:
+            with (
+                patch.object(tm.video, "combine_videos"),
+                patch.object(
+                    tm.video, "generate_video", side_effect=_fake_generate_video
+                ),
+                patch.object(tm.sm.state, "update_task"),
+            ):
+                tm.generate_final_videos(
+                    task_id=task_id,
+                    params=params,
+                    downloaded_videos=["material.mp4"],
+                    audio_file="audio.mp3",
+                    subtitle_path="",
+                    audio_duration=5,
+                )
+
+            exported_path = os.path.join(export_dir, "my-video.mp4")
+            self.assertTrue(os.path.isfile(exported_path))
+            with open(exported_path, "rb") as f:
+                self.assertEqual(f.read(), b"fake video bytes")
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            shutil.rmtree(export_dir, ignore_errors=True)
+
+    def test_generate_final_videos_appends_index_suffix_for_multiple_videos(self):
+        """多个视频共用同一个自定义文件名时必须加序号，避免互相覆盖。"""
+        task_id = "export-custom-path-multi-task"
+        task_dir = utils.task_dir(task_id)
+        export_dir = tempfile.mkdtemp()
+        params = VideoParams(
+            video_subject="test",
+            video_count=2,
+            output_dir=export_dir,
+            output_filename="my-video",
+        )
+
+        def _fake_generate_video(**kwargs):
+            with open(kwargs["output_file"], "wb") as f:
+                f.write(b"x")
+            return True
+
+        try:
+            with (
+                patch.object(tm.video, "combine_videos"),
+                patch.object(
+                    tm.video, "generate_video", side_effect=_fake_generate_video
+                ),
+                patch.object(tm.sm.state, "update_task"),
+            ):
+                tm.generate_final_videos(
+                    task_id=task_id,
+                    params=params,
+                    downloaded_videos=["material.mp4"],
+                    audio_file="audio.mp3",
+                    subtitle_path="",
+                    audio_duration=5,
+                )
+
+            self.assertTrue(
+                os.path.isfile(os.path.join(export_dir, "my-video-1.mp4"))
+            )
+            self.assertTrue(
+                os.path.isfile(os.path.join(export_dir, "my-video-2.mp4"))
+            )
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            shutil.rmtree(export_dir, ignore_errors=True)
+
+    def test_generate_final_videos_export_failure_does_not_break_task(self):
+        """导出目录不可用时只能记警告，不能让已经生成好的视频跟着失败。"""
+        task_id = "export-custom-path-bad-dir-task"
+        task_dir = utils.task_dir(task_id)
+        # 用一个已存在的普通文件充当"目录"，makedirs 必然失败。
+        blocking_file = tempfile.NamedTemporaryFile(delete=False)
+        blocking_file.close()
+        params = VideoParams(
+            video_subject="test",
+            video_count=1,
+            output_dir=blocking_file.name,
+            output_filename="my-video",
+        )
+
+        def _fake_generate_video(**kwargs):
+            with open(kwargs["output_file"], "wb") as f:
+                f.write(b"x")
+            return True
+
+        try:
+            with (
+                patch.object(tm.video, "combine_videos"),
+                patch.object(
+                    tm.video, "generate_video", side_effect=_fake_generate_video
+                ),
+                patch.object(tm.sm.state, "update_task"),
+            ):
+                final_paths, _, warnings = tm.generate_final_videos(
+                    task_id=task_id,
+                    params=params,
+                    downloaded_videos=["material.mp4"],
+                    audio_file="audio.mp3",
+                    subtitle_path="",
+                    audio_duration=5,
+                )
+
+            self.assertEqual(len(final_paths), 1)
+            self.assertTrue(os.path.isfile(final_paths[0]))
+            self.assertEqual(warnings, [])
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+            os.unlink(blocking_file.name)
 
     def test_generate_final_videos_uses_generated_sonilo_music(self):
         """Sonilo 必须针对每条拼接后的视频生成配乐，并传给最终混音。"""
@@ -497,12 +652,30 @@ class TestTaskService(unittest.TestCase):
             match_script_order=True,
         )
 
-    def test_start_stops_before_materials_when_term_provider_fails(self):
+    def test_generate_terms_falls_back_to_script_when_llm_unavailable(self):
         """
-        关键词 Provider 失败后，任务必须立即结束，不能继续生成音频或下载素材。
+        用户明确要求：没有配置任何 LLM Provider（或 Provider 调用失败）时，
+        Pexels/Pixabay/Coverr 的素材搜索也必须继续可用，不能因为缺少 API key
+        就让整条任务失败——直接从脚本原文提取关键词作为兜底。
+        """
+        params = VideoParams(
+            video_subject="startup story",
+            video_script="A short startup story. It grew fast.",
+        )
 
-        这里从任务入口覆盖完整的错误传播路径，避免未来只修服务层返回类型，
-        却又在任务编排层把空列表转换成其它真值后继续执行外部请求。
+        with patch.object(
+            tm.llm, "_generate_response", return_value="Error: invalid API key"
+        ):
+            result = tm.generate_terms("task-id", params, params.video_script)
+
+        self.assertIsNotNone(result)
+        self.assertIn("startup story", result)
+        self.assertGreater(len(result), 1)
+
+    def test_start_continues_past_materials_when_term_provider_fails(self):
+        """
+        任务入口的端到端验证：关键词 Provider 失败不再让任务在 terms 阶段
+        直接结束，而是继续用脚本兜底关键词进入素材下载阶段。
         """
         params = VideoParams(
             video_subject="startup story",
@@ -516,19 +689,20 @@ class TestTaskService(unittest.TestCase):
                 "_generate_response",
                 return_value="Error: invalid API key",
             ),
-            patch.object(tm, "generate_audio") as generate_audio,
-            patch.object(tm, "get_video_materials") as get_video_materials,
+            patch.object(
+                tm, "generate_audio", return_value=("audio.mp3", 5, object())
+            ) as generate_audio,
+            patch.object(
+                tm, "get_video_materials", return_value=["material.mp4"]
+            ) as get_video_materials,
             patch.object(tm.sm, "state", state),
         ):
-            result = tm.start("term-provider-error", params)
+            tm.start("term-provider-fallback", params, stop_at="materials")
 
-        generate_audio.assert_not_called()
-        get_video_materials.assert_not_called()
-        failed_task = state.get_task("term-provider-error")
-        self.assertEqual(result, failed_task)
-        self.assertEqual(failed_task["state"], tm.const.TASK_STATE_FAILED)
-        self.assertEqual(failed_task["failed_stage"], "terms")
-        self.assertTrue(failed_task["error"])
+        generate_audio.assert_called_once()
+        get_video_materials.assert_called_once()
+        called_terms = get_video_materials.call_args.args[2]
+        self.assertIn("startup story", called_terms)
     
     def test_generate_audio_uses_custom_file_inside_task_directory(self):
         task_id = "test-custom-audio-safe"
