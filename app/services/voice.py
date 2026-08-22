@@ -7,11 +7,13 @@ import math
 import os
 import queue
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 import wave
 from collections import OrderedDict
 from datetime import datetime
@@ -1663,7 +1665,157 @@ def _get_cached_vieneu_client():
         from vieneu import Vieneu
 
         _vieneu_client = Vieneu()
+        _apply_vieneu_custom_voices(_vieneu_client)
     return _vieneu_client
+
+
+def _vieneu_custom_voices_dir() -> str:
+    return utils.storage_dir("vieneu_voices", create=True)
+
+
+def _vieneu_custom_voices_file() -> str:
+    return os.path.join(_vieneu_custom_voices_dir(), "voices.json")
+
+
+def _load_vieneu_custom_voices_metadata() -> list:
+    path = _vieneu_custom_voices_file()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"failed to read VieNeu-TTS custom voices metadata: {e}")
+        return []
+
+
+def _save_vieneu_custom_voices_metadata(entries: list) -> None:
+    path = _vieneu_custom_voices_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+
+def _apply_vieneu_custom_voices(client) -> None:
+    """Dang ky lai cac giong tu nhan ban (luu trong storage/vieneu_voices/)
+    vao client VieNeu-TTS vua tao.
+
+    Co tinh luu rieng ngoai thu muc cai dat cua goi ``vieneu`` (thay vi dung
+    save=True mac dinh cua thu vien, se ghi de vao chinh file preset noi bo
+    cua goi) vi hai ly do: (1) nang cap goi vieneu se ghi de/xoa mat giong
+    da them neu luu trong do; (2) du an co 2 moi truong Python rieng biet
+    (.venv luc dev, lib/python luc chay that) voi 2 ban cai vieneu doc lap -
+    luu trong storage/ dung chung duoc ca hai, dong bo voi cach cac tu lieu
+    khac cua nguoi dung da luu (BGM, video local...).
+    """
+    for entry in _load_vieneu_custom_voices_metadata():
+        name = entry.get("name")
+        audio_file = entry.get("audio_file")
+        if not name or not audio_file:
+            continue
+        audio_path = os.path.join(_vieneu_custom_voices_dir(), audio_file)
+        if not os.path.isfile(audio_path):
+            logger.warning(
+                f"missing reference audio for custom VieNeu-TTS voice "
+                f"'{name}': {audio_path}"
+            )
+            continue
+        gender_vi = entry.get("gender") or "Nữ"
+        try:
+            client.add_voice(
+                name,
+                audio_path,
+                description=f"{gender_vi} · Giọng riêng",
+                gender="Male" if gender_vi == "Nam" else "Female",
+                style="tu_nhien",
+                save=False,
+            )
+        except Exception as e:
+            logger.warning(
+                f"failed to register custom VieNeu-TTS voice '{name}': {e}"
+            )
+
+
+def add_vieneu_custom_voice(
+    name: str, ref_audio_path: str, gender_vi: str = "Nữ"
+) -> str:
+    """Nhan ban 1 giong doc moi cho VieNeu-TTS tu file am thanh mau
+    ``ref_audio_path``, dang ky ngay vao client dang chay (dung duoc luon,
+    khong can khoi dong lai app) va luu lai de con giu qua nhung lan mo app
+    sau. Tra ve chuoi rong neu thanh cong, nguoc lai tra ve thong bao loi
+    bang tieng Viet de hien thang len WebUI."""
+    name = (name or "").strip()
+    if not name:
+        return "Tên giọng không được để trống."
+
+    try:
+        client = _get_cached_vieneu_client()
+    except Exception as e:
+        return f"Không tải được VieNeu-TTS: {e}"
+
+    existing_names = {voice_id for _label, voice_id in client.list_preset_voices()}
+    if name in existing_names:
+        return f"Đã có giọng tên '{name}' rồi, hãy đặt tên khác."
+
+    voices_dir = _vieneu_custom_voices_dir()
+    os.makedirs(voices_dir, exist_ok=True)
+    ext = os.path.splitext(ref_audio_path)[1].lower() or ".wav"
+    safe_name = re.sub(r"[^\w\-]+", "_", name, flags=re.UNICODE).strip("_") or "giong"
+    stored_filename = f"{safe_name}_{uuid.uuid4().hex[:8]}{ext}"
+    stored_path = os.path.join(voices_dir, stored_filename)
+    shutil.copy2(ref_audio_path, stored_path)
+
+    gender_en = "Male" if gender_vi == "Nam" else "Female"
+    try:
+        client.add_voice(
+            name,
+            stored_path,
+            description=f"{gender_vi} · Giọng riêng",
+            gender=gender_en,
+            style="tu_nhien",
+            save=False,
+        )
+    except Exception as e:
+        try:
+            os.remove(stored_path)
+        except Exception:
+            pass
+        return f"Không nhân bản được giọng (kiểm tra lại file âm thanh mẫu): {e}"
+
+    entries = _load_vieneu_custom_voices_metadata()
+    entries.append({"name": name, "audio_file": stored_filename, "gender": gender_vi})
+    _save_vieneu_custom_voices_metadata(entries)
+    logger.success(f"added custom VieNeu-TTS voice: {name}")
+    return ""
+
+
+def list_vieneu_custom_voices() -> list:
+    return _load_vieneu_custom_voices_metadata()
+
+
+def remove_vieneu_custom_voice(name: str) -> None:
+    entries = _load_vieneu_custom_voices_metadata()
+    remaining = []
+    voices_dir = _vieneu_custom_voices_dir()
+    for entry in entries:
+        if entry.get("name") == name:
+            audio_file = entry.get("audio_file")
+            if audio_file:
+                try:
+                    os.remove(os.path.join(voices_dir, audio_file))
+                except Exception:
+                    pass
+        else:
+            remaining.append(entry)
+    _save_vieneu_custom_voices_metadata(remaining)
+
+    global _vieneu_client
+    if _vieneu_client is not None:
+        try:
+            _vieneu_client.remove_voice(name)
+        except Exception:
+            pass
 
 
 def _parse_vieneu_gender(label: str) -> str:

@@ -936,7 +936,9 @@ class TestVoiceService(unittest.TestCase):
     # VieNeu-TTS (offline/local Vietnamese) TTS
     # ---------------------------------------------------------------
 
-    def _install_fake_vieneu_module(self, infer_calls, save_calls=None, factory_calls=None):
+    def _install_fake_vieneu_module(
+        self, infer_calls, save_calls=None, factory_calls=None, add_voice_calls=None
+    ):
         """Install a fake ``vieneu`` package into sys.modules so
         vieneu_tts()/get_all_vieneu_voices() can be exercised without the
         real (large, model-downloading) library."""
@@ -946,13 +948,42 @@ class TestVoiceService(unittest.TestCase):
 
         save_calls = save_calls if save_calls is not None else []
         factory_calls = factory_calls if factory_calls is not None else []
+        add_voice_calls = add_voice_calls if add_voice_calls is not None else []
 
         class _FakeVieneuClient:
+            def __init__(self):
+                # 用有序 dict 模拟真实库的 _preset_voices：内置音色打底，
+                # add_voice()/remove_voice() 直接增删同一份数据，和
+                # list_preset_voices() 保持一致。
+                self._voices = {
+                    "Minh Đức": "Nam · Bắc · Phong cách tin tức",
+                    "Trúc Ly": "Nữ · Bắc · Phong cách tự nhiên",
+                }
+
             def list_preset_voices(self):
                 return [
-                    ("Minh Đức — Nam · Bắc · Phong cách tin tức", "Minh Đức"),
-                    ("Trúc Ly — Nữ · Bắc · Phong cách tự nhiên", "Trúc Ly"),
+                    (f"{name} — {desc}" if desc else name, name)
+                    for name, desc in self._voices.items()
                 ]
+
+            def add_voice(
+                self,
+                name,
+                ref_audio,
+                *,
+                denoise=True,
+                use_ref_codes=True,
+                description="",
+                gender="",
+                style="tu_nhien",
+                save=False,
+            ):
+                add_voice_calls.append((name, str(ref_audio)))
+                self._voices[name] = description
+                return name
+
+            def remove_voice(self, name, save=False):
+                self._voices.pop(name, None)
 
             def infer(self, text, voice=None, style="tu_nhien", **kwargs):
                 infer_calls.append((text, voice))
@@ -1053,6 +1084,127 @@ class TestVoiceService(unittest.TestCase):
 
             self.assertIsNotNone(sub_maker)
             self.assertEqual(infer_calls, [("Xin chào", "Minh Đức")])
+
+    def test_add_vieneu_custom_voice_registers_and_persists(self):
+        """
+        克隆声音必须立刻可用（同一进程内 client 已注册），并且要写入
+        storage/vieneu_voices/voices.json 供下次启动恢复——这是唯一的持久化
+        方式，不依赖 vieneu 库自带的 save_voices()（那个默认会覆盖包内置
+        的预设文件，升级库或换到 lib/python 生产解释器时都会丢失）。
+        """
+        infer_calls, save_calls, factory_calls, add_voice_calls = [], [], [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voices_dir = Path(tmp_dir) / "vieneu_voices"
+            ref_audio = Path(tmp_dir) / "ref.wav"
+            ref_audio.write_bytes(b"fake wav bytes")
+
+            with (
+                self._install_fake_vieneu_module(
+                    infer_calls, save_calls, factory_calls, add_voice_calls
+                ),
+                patch.object(vs, "_vieneu_client", None),
+                patch.object(vs, "_vieneu_custom_voices_dir", return_value=str(voices_dir)),
+            ):
+                error = vs.add_vieneu_custom_voice(
+                    "Giọng Của Tôi", str(ref_audio), gender_vi="Nam"
+                )
+                self.assertEqual(error, "")
+                self.assertEqual(len(add_voice_calls), 1)
+                self.assertEqual(add_voice_calls[0][0], "Giọng Của Tôi")
+
+                # 立刻可用，不需要重启/重新创建 client。
+                all_voices = vs.get_all_vieneu_voices()
+                self.assertIn("vieneu:Giọng Của Tôi-Male", all_voices)
+
+                # 元数据落盘，且参考音频被复制到 storage 里（不是仅仅记录原路径 -
+                # 用户上传时的临时文件后续会被清理，必须有自己的永久副本）。
+                persisted = vs.list_vieneu_custom_voices()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(persisted[0]["name"], "Giọng Của Tôi")
+                self.assertEqual(persisted[0]["gender"], "Nam")
+                stored_audio_path = voices_dir / persisted[0]["audio_file"]
+                self.assertTrue(stored_audio_path.is_file())
+                self.assertNotEqual(str(stored_audio_path), str(ref_audio))
+
+    def test_add_vieneu_custom_voice_rejects_duplicate_and_empty_name(self):
+        infer_calls, save_calls, factory_calls, add_voice_calls = [], [], [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voices_dir = Path(tmp_dir) / "vieneu_voices"
+            ref_audio = Path(tmp_dir) / "ref.wav"
+            ref_audio.write_bytes(b"fake wav bytes")
+
+            with (
+                self._install_fake_vieneu_module(
+                    infer_calls, save_calls, factory_calls, add_voice_calls
+                ),
+                patch.object(vs, "_vieneu_client", None),
+                patch.object(vs, "_vieneu_custom_voices_dir", return_value=str(voices_dir)),
+            ):
+                self.assertNotEqual(
+                    vs.add_vieneu_custom_voice("", str(ref_audio)), ""
+                )
+                self.assertEqual(add_voice_calls, [])
+
+                self.assertEqual(
+                    vs.add_vieneu_custom_voice("X", str(ref_audio)), ""
+                )
+                # 已有内置音色 "Minh Đức"，同名必须拒绝，不能覆盖预设声音。
+                error = vs.add_vieneu_custom_voice("Minh Đức", str(ref_audio))
+                self.assertNotEqual(error, "")
+                self.assertEqual(len(add_voice_calls), 1)
+
+    def test_apply_vieneu_custom_voices_reloads_on_next_client_creation(self):
+        """
+        克隆声音必须在"重启应用"（这里模拟为重新创建 client）后依然可用 -
+        对应用户重新打开 WebUI 的真实场景。
+        """
+        infer_calls, save_calls, factory_calls, add_voice_calls = [], [], [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voices_dir = Path(tmp_dir) / "vieneu_voices"
+            ref_audio = Path(tmp_dir) / "ref.wav"
+            ref_audio.write_bytes(b"fake wav bytes")
+
+            with (
+                self._install_fake_vieneu_module(
+                    infer_calls, save_calls, factory_calls, add_voice_calls
+                ),
+                patch.object(vs, "_vieneu_client", None),
+                patch.object(vs, "_vieneu_custom_voices_dir", return_value=str(voices_dir)),
+            ):
+                vs.add_vieneu_custom_voice("Giọng Bền Vững", str(ref_audio))
+                # 模拟应用重启：丢弃当前 client，逼下一次调用重新创建。
+                vs._vieneu_client = None
+                all_voices = vs.get_all_vieneu_voices()
+
+            self.assertIn("vieneu:Giọng Bền Vững-Female", all_voices)
+            # 重新创建 client 时应该重新调用一次 add_voice() 把它注册回去。
+            self.assertEqual(len(add_voice_calls), 2)
+
+    def test_remove_vieneu_custom_voice_deletes_metadata_audio_and_live_voice(self):
+        infer_calls, save_calls, factory_calls, add_voice_calls = [], [], [], []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            voices_dir = Path(tmp_dir) / "vieneu_voices"
+            ref_audio = Path(tmp_dir) / "ref.wav"
+            ref_audio.write_bytes(b"fake wav bytes")
+
+            with (
+                self._install_fake_vieneu_module(
+                    infer_calls, save_calls, factory_calls, add_voice_calls
+                ),
+                patch.object(vs, "_vieneu_client", None),
+                patch.object(vs, "_vieneu_custom_voices_dir", return_value=str(voices_dir)),
+            ):
+                vs.add_vieneu_custom_voice("Giọng Tạm", str(ref_audio))
+                stored_audio_path = voices_dir / vs.list_vieneu_custom_voices()[0]["audio_file"]
+                self.assertTrue(stored_audio_path.is_file())
+
+                vs.remove_vieneu_custom_voice("Giọng Tạm")
+
+                self.assertEqual(vs.list_vieneu_custom_voices(), [])
+                self.assertFalse(stored_audio_path.is_file())
+                self.assertNotIn(
+                    "vieneu:Giọng Tạm-Female", vs.get_all_vieneu_voices()
+                )
 
     def test_generate_subtitle_keeps_edge_provider_for_gemini_legacy_submaker(self):
         """

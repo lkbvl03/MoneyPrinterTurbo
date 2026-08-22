@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from collections.abc import Mapping
 from datetime import datetime
@@ -3283,6 +3284,83 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
     return uploaded_bgm_file
 
 
+def _render_vieneu_custom_voice_panel():
+    """Nhan ban giong doc rieng cho VieNeu-TTS tu 1 file am thanh mau. Dat
+    ngoai expander de khong choan cho khi khong dung toi; danh sach giong da
+    them hien kem nut xoa de nguoi dung tu quan ly."""
+    with st.expander(tr("Add Custom VieNeu-TTS Voice"), expanded=False):
+        st.caption(tr("Add Custom VieNeu-TTS Voice Help"))
+
+        custom_voices = voice.list_vieneu_custom_voices()
+        if custom_voices:
+            for entry in custom_voices:
+                voice_display_name = entry.get("name", "")
+                voice_gender = entry.get("gender", "")
+                row_cols = st.columns([4, 1], vertical_alignment="center")
+                row_cols[0].write(f"{voice_display_name} ({voice_gender})")
+                delete_label = tr("Delete")
+                if row_cols[1].button(
+                    delete_label,
+                    key=f"delete_vieneu_voice_{voice_display_name}",
+                    icon=":material/delete:",
+                    help=delete_label,
+                    use_container_width=True,
+                ):
+                    voice.remove_vieneu_custom_voice(voice_display_name)
+                    st.toast(tr("Voice Deleted"))
+                    st.rerun()
+
+        new_voice_name = st.text_input(
+            tr("New Voice Name"),
+            key="vieneu_new_voice_name_input",
+        )
+        new_voice_gender = st.radio(
+            tr("Gender"),
+            options=["Nữ", "Nam"],
+            key="vieneu_new_voice_gender_radio",
+            horizontal=True,
+        )
+        ref_audio_file = st.file_uploader(
+            tr("Reference Audio"),
+            type=sorted(
+                extension.removeprefix(".") for extension in CUSTOM_AUDIO_EXTENSIONS
+            ),
+            accept_multiple_files=False,
+            key="vieneu_ref_audio_uploader",
+            help=tr("Reference Audio Help"),
+        )
+        if st.button(
+            tr("Clone Voice"),
+            key="vieneu_add_voice_button",
+            type="secondary",
+            icon=":material/record_voice_over:",
+        ):
+            if not new_voice_name.strip():
+                st.warning(tr("Voice Name Required"))
+            elif not ref_audio_file:
+                st.warning(tr("Reference Audio Required"))
+            else:
+                tmp_dir = tempfile.mkdtemp(prefix="vieneu_ref_")
+                try:
+                    ext = os.path.splitext(ref_audio_file.name)[1] or ".wav"
+                    tmp_path = os.path.join(tmp_dir, f"ref{ext}")
+                    with open(tmp_path, "wb") as f:
+                        f.write(ref_audio_file.getbuffer())
+                    with st.spinner(tr("Cloning Voice")):
+                        clone_error = voice.add_vieneu_custom_voice(
+                            new_voice_name.strip(),
+                            tmp_path,
+                            gender_vi=new_voice_gender,
+                        )
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                if clone_error:
+                    st.error(clone_error)
+                else:
+                    st.success(tr("Voice Cloned Successfully"))
+                    st.rerun()
+
+
 def _render_audio_settings(panel, params):
     """渲染音频设置并返回上传音频与当前配音模式。"""
     with panel:
@@ -3655,6 +3733,7 @@ def _render_audio_settings(panel, params):
                 or (voice_name and voice.is_vieneu_voice(voice_name))
             ):
                 st.caption(tr("VieNeu-TTS Help"))
+                _render_vieneu_custom_voice_panel()
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；
             # 上传音频只需要文件和音量；无配音不再展示无效设置。
