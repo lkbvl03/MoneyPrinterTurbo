@@ -90,6 +90,10 @@ class VideoParams(BaseModel):
     # video_clip_duration，默认 7；这里改用图片素材原本更常见的 4 秒默认值）。
     image_clip_duration: Optional[int] = Field(default=4, ge=1)
     card_text_config: Optional[str] = None
+    # None = tu dong can bang theo nhac nen (90% am luong nhac nen, xem
+    # video.py). Nguoi dung co the ghi de bang 1 gia tri co dinh neu muon
+    # tu chinh tay thay vi de he thong tu tinh.
+    card_sound_volume: Optional[float] = Field(default=None, ge=0.0, le=5.0)
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
     video_count: Optional[int] = 1

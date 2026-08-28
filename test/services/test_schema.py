@@ -60,6 +60,20 @@ class TestVideoParams(unittest.TestCase):
         with self.assertRaises(pydantic.ValidationError):
             VideoParams(video_subject="test", video_overlay_effect="not-a-real-effect")
 
+    def test_card_sound_volume_defaults_to_none_for_auto_balance(self):
+        params = VideoParams(video_subject="test")
+        self.assertIsNone(params.card_sound_volume)
+
+    def test_card_sound_volume_accepts_an_explicit_value(self):
+        params = VideoParams(video_subject="test", card_sound_volume=0.15)
+        self.assertEqual(params.card_sound_volume, 0.15)
+
+    def test_card_sound_volume_rejects_out_of_range_values(self):
+        with self.assertRaises(pydantic.ValidationError):
+            VideoParams(video_subject="test", card_sound_volume=-0.1)
+        with self.assertRaises(pydantic.ValidationError):
+            VideoParams(video_subject="test", card_sound_volume=5.1)
+
     def test_image_clip_duration_defaults_to_four_seconds(self):
         params = VideoParams(video_subject="test")
         self.assertEqual(params.image_clip_duration, 4)

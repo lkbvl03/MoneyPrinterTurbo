@@ -435,6 +435,16 @@ Output and exit status:
         ),
     )
     video_group.add_argument(
+        "--card-sound-volume",
+        type=float,
+        default=None,
+        help=(
+            "fixed volume multiplier for card text sound effects, e.g. 0.5 for "
+            "50%% (default: auto, 90%% of --bgm-volume when background music is "
+            "on, unchanged otherwise)"
+        ),
+    )
+    video_group.add_argument(
         "--video-clip-duration",
         type=_positive_int,
         default=None,
@@ -746,6 +756,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_transition_style",
         "video_overlay_effect",
         "card_text_config",
+        "card_sound_volume",
         "video_clip_duration",
         "image_clip_duration",
         "match_materials_to_script",

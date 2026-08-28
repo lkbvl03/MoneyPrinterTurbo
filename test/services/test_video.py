@@ -770,6 +770,98 @@ class TestVideoService(unittest.TestCase):
         self.assertEqual(len(audio_clips), 2)
         self.assertEqual(audio_clips[1].start, 0.5)
 
+    def _run_generate_video_with_card_sound_and_bgm(self, params, card_timings):
+        """跑一遍带卡片音效 + 真实 BGM 混音路径的 generate_video()，返回每次
+        AudioArrayClip.with_effects() 收到的 MultiplyVolume.factor 列表，
+        供音量避让相关的用例复用。"""
+        source_video = _FakeMoviePyClip()
+        voice_source = _FakeMoviePyClip()
+        bgm_source = _FakeMoviePyClip()
+        composited_video = _FakeMoviePyClip()
+        mixed_audio = _FakeMoviePyClip()
+        final_video = _FakeMoviePyClip()
+        composited_video.with_audio_result = final_video
+
+        captured_factors = []
+
+        class _FakeAudioArrayClip:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def with_start(self, _start):
+                return self
+
+            def with_effects(self, effects):
+                captured_factors.append(effects[0].factor)
+                return self
+
+        with (
+            patch.object(vd, "_open_video_clip_quietly", return_value=source_video),
+            patch.object(
+                vd, "AudioFileClip", side_effect=[voice_source, bgm_source]
+            ),
+            patch.object(vd, "get_bgm_file", return_value="library.mp3"),
+            patch.object(vd, "CompositeVideoClip", return_value=composited_video),
+            patch.object(vd, "CompositeAudioClip", return_value=mixed_audio),
+            patch.object(vd, "AudioArrayClip", _FakeAudioArrayClip),
+            patch.object(vd, "_write_videofile_with_codec_fallback"),
+            patch.object(vd, "_get_configured_video_codec", return_value="libx264"),
+        ):
+            result = vd.generate_video(
+                video_path="combined.mp4",
+                audio_path="voice.mp3",
+                subtitle_path="",
+                output_file="final.mp4",
+                params=params,
+                card_timings=card_timings,
+            )
+
+        self.assertTrue(result)
+        return captured_factors
+
+    def test_generate_video_auto_balances_card_sound_volume_against_bgm(self):
+        """未手动设置 card_sound_volume 时必须维持原有自动避让策略：卡片
+        音效音量等于 BGM 音量的 90%。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="random",
+            bgm_file="library.mp3",
+            bgm_volume=0.5,
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "bounce",'
+                ' "sound": "auto"}]'
+            ),
+        )
+        card_timings = [vd.ResolvedCardTiming(slot=1, text="Boing", start_time=0.5)]
+
+        factors = self._run_generate_video_with_card_sound_and_bgm(
+            params, card_timings
+        )
+        self.assertEqual(factors, [0.45])
+
+    def test_generate_video_respects_explicit_card_sound_volume_override(self):
+        """用户手动设置 card_sound_volume 后必须直接生效，跳过自动避让公式，
+        不会被 BGM 音量重新覆盖。"""
+        params = vd.VideoParams(
+            video_subject="test",
+            subtitle_enabled=False,
+            bgm_type="random",
+            bgm_file="library.mp3",
+            bgm_volume=0.5,
+            card_sound_volume=0.15,
+            card_text_config=(
+                '[{"slot": 1, "style": "minimal_white", "effect": "bounce",'
+                ' "sound": "auto"}]'
+            ),
+        )
+        card_timings = [vd.ResolvedCardTiming(slot=1, text="Boing", start_time=0.5)]
+
+        factors = self._run_generate_video_with_card_sound_and_bgm(
+            params, card_timings
+        )
+        self.assertEqual(factors, [0.15])
+
     def test_generate_video_without_card_timings_matches_current_behavior(self):
         """不传 card_timings（现有所有调用方式）必须与今天完全一致——回归保护。"""
         params = vd.VideoParams(

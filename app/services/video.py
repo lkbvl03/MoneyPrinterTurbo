@@ -1424,11 +1424,18 @@ def generate_video(
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
 
-        # 提前计算 BGM 是否会真正参与混音，供卡片音效在此基础上做音量避让。
-        # 没有 BGM 时音效保持原有音量，不因为这条规则被静音；有 BGM 时按 BGM
-        # 音量的 90% 等比例跟随，音效始终比背景音乐轻，避免互相盖过。
+        # bgm_enabled 提前算好，后面混音那段也要用，不能只在下面的 else 分支
+        # 里算——否则用户手动设置 card_sound_volume 时这个名字压根不会被赋值，
+        # 混音那段引用它就会直接 NameError。
         bgm_enabled = bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
-        card_sound_volume = params.bgm_volume * 0.9 if bgm_enabled else 1.0
+        # card_sound_volume 显式设置时（用户手动调整）直接使用该值，跳过自动
+        # 避让逻辑。留空(None)则维持原有自动策略：没有 BGM 时音效保持原有音量，
+        # 不因为这条规则被静音；有 BGM 时按 BGM 音量的 90% 等比例跟随，音效
+        # 始终比背景音乐轻，避免互相盖过。
+        if params.card_sound_volume is not None:
+            card_sound_volume = params.card_sound_volume
+        else:
+            card_sound_volume = params.bgm_volume * 0.9 if bgm_enabled else 1.0
 
         card_clips = []
         card_sound_clips = []

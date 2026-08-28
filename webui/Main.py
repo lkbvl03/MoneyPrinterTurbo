@@ -2282,6 +2282,23 @@ def _render_card_text_panel(params):
                 params.card_text_config = None
                 return
 
+            card_volume_options = ["auto", 0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0]
+            selected_card_volume = stable_selectbox(
+                tr("Card Sound Volume"),
+                options=card_volume_options,
+                default_value="auto",
+                key="card_sound_volume_select",
+                format_func=lambda value: (
+                    tr("Auto Balance (90% of Background Music)")
+                    if value == "auto"
+                    else f"{int(value * 100)}%"
+                ),
+                help=tr("Card Sound Volume Help"),
+            )
+            params.card_sound_volume = (
+                None if selected_card_volume == "auto" else selected_card_volume
+            )
+
             style_options = ["random", *sorted(CARD_STYLES)]
             effect_options = ["random", *sorted(CARD_EFFECTS)]
             sound_options = ["auto", "none", *sorted(CARD_SOUNDS)]
