@@ -1673,13 +1673,17 @@ def stable_segmented_control(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_groq_model_ids(api_key: str, base_url: str) -> list[str]:
-    if not api_key:
+def get_openai_compatible_model_ids(
+    api_key: str, base_url: str, *, log_context: str = "provider"
+) -> list[str]:
+    # 适用于所有实现了 OpenAI `/v1/models` 规范的 Provider（Groq、OpenAI、
+    # DeepSeek 等默认 adapter="openai_compatible" 的厂商）。Registry 里静态
+    # 维护的 default_model 会随厂商下线/改名而过期（如 Gemini 2.5 Flash 被
+    # 强制迁移），实时拉取账号下真正可用的模型列表能从根源上避免这个问题。
+    if not api_key or not base_url:
         return []
 
-    normalized_base_url = (
-        (base_url or "https://api.groq.com/openai/v1").strip().rstrip("/")
-    )
+    normalized_base_url = base_url.strip().rstrip("/")
     models_url = f"{normalized_base_url}/models"
 
     try:
@@ -1701,7 +1705,42 @@ def get_groq_model_ids(api_key: str, base_url: str) -> list[str]:
 
         return sorted(set(model_ids))
     except Exception as e:
-        logger.warning(f"failed to fetch groq models: {e}")
+        logger.warning(f"failed to fetch {log_context} models: {e}")
+        return []
+
+
+def get_gemini_model_ids(api_key: str) -> list[str]:
+    # Gemini 用自己的 REST 端点列出模型，不是 OpenAI `/v1/models` 规范，
+    # 所以单独实现；同样只在这里做一次网络调用，失败时静默回退到手动输入。
+    if not api_key:
+        return []
+
+    try:
+        response = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": api_key, "pageSize": 1000},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("models", [])
+
+        model_ids = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            # 过滤掉纯 Embedding / 图像等不支持 generateContent 的模型，
+            # 避免下拉框里出现选了也无法用于脚本生成的选项。
+            methods = item.get("supportedGenerationMethods") or []
+            if "generateContent" not in methods:
+                continue
+            name = item.get("name", "")
+            if isinstance(name, str) and name.strip():
+                model_ids.append(name.strip().removeprefix("models/"))
+
+        return sorted(set(model_ids))
+    except Exception as e:
+        logger.warning(f"failed to fetch gemini models: {e}")
         return []
 
 
@@ -1973,37 +2012,43 @@ def _render_settings_dialog():
                     key=f"{llm_provider}_base_url_input",
                 )
             st_llm_model_name = ""
-            if llm_provider == "groq":
-                effective_api_key = st_llm_api_key or llm_api_key
-                effective_base_url = st_llm_base_url or llm_base_url
-                groq_models = get_groq_model_ids(
-                    api_key=effective_api_key,
-                    base_url=effective_base_url,
+            # Groq 之外，adapter 为默认 "openai_compatible" 的厂商（OpenAI、
+            # DeepSeek、AIHubMix 等）也实现了同一套 `/v1/models` 规范，
+            # Gemini 则用自己的端点单独取——三者都能实时拉取账号下真正可用
+            # 的模型，而不是依赖 Registry 里可能过期的 default_model。
+            fetched_models: list[str] = []
+            effective_api_key = st_llm_api_key or llm_api_key
+            effective_base_url = st_llm_base_url or llm_base_url
+            if llm_provider_spec.adapter == "gemini":
+                fetched_models = get_gemini_model_ids(effective_api_key)
+            elif llm_provider_spec.adapter == "openai_compatible":
+                fetched_models = get_openai_compatible_model_ids(
+                    effective_api_key,
+                    effective_base_url,
+                    log_context=llm_provider,
                 )
 
-                if groq_models:
-                    selected_index = 0
-                    if llm_model_name in groq_models:
-                        selected_index = groq_models.index(llm_model_name)
+            if fetched_models:
+                selected_index = 0
+                if llm_model_name in fetched_models:
+                    selected_index = fetched_models.index(llm_model_name)
 
-                    st_llm_model_name = llm_form_panel.selectbox(
-                        tr("Model Name"),
-                        options=groq_models,
-                        index=selected_index,
-                        key="groq_model_name_select",
-                    )
+                st_llm_model_name = llm_form_panel.selectbox(
+                    tr("Model Name"),
+                    options=fetched_models,
+                    index=selected_index,
+                    key=f"{llm_provider}_model_name_select",
+                )
+            elif llm_provider_spec.adapter in ("gemini", "openai_compatible"):
+                st_llm_model_name = llm_form_panel.text_input(
+                    tr("Model Name"),
+                    value=llm_model_name,
+                    key=f"{llm_provider}_model_name_input",
+                )
+                if effective_api_key:
+                    llm_form_panel.caption(tr("LLM Model List Load Failed"))
                 else:
-                    st_llm_model_name = llm_form_panel.text_input(
-                        tr("Model Name"),
-                        value=llm_model_name,
-                        key="groq_model_name_input",
-                    )
-                    if effective_api_key:
-                        llm_form_panel.caption(tr("Groq Model List Load Failed"))
-                    else:
-                        llm_form_panel.caption(
-                            tr("Groq API Key Required for Model List")
-                        )
+                    llm_form_panel.caption(tr("LLM API Key Required for Model List"))
             else:
                 st_llm_model_name = llm_form_panel.text_input(
                     tr("Model Name"),

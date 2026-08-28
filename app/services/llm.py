@@ -137,6 +137,34 @@ def _extract_qwen_generation_text(response) -> str:
     return _normalize_text_response(text, "qwen")
 
 
+_MODEL_UNAVAILABLE_MARKERS = (
+    "not_found",
+    "not found",
+    "no longer available",
+    "does not exist",
+    "decommission",
+    "deprecated",
+    "unknown model",
+    "invalid model",
+    "unsupported model",
+    "404",
+)
+
+
+def _is_model_unavailable_error(error: Exception) -> bool:
+    """粗略判断报错是否因为所选模型已被厂商下线/改名，而不是配额、网络等其它原因。
+
+    各家 API 的下线提示措辞不同（如 Gemini 用 "no longer available"，OpenAI
+    兼容接口常用 "does not exist"），这里用宽松的关键词匹配覆盖常见措辞，
+    误判的代价也很小：只是多重试一次默认模型，不会掩盖真实错误——重试失败
+    后原始异常仍会被抛出。
+    """
+    message = str(error).lower()
+    if "model" not in message:
+        return False
+    return any(marker in message for marker in _MODEL_UNAVAILABLE_MARKERS)
+
+
 def _generate_response(prompt: str) -> str:
     try:
         llm_provider = str(
@@ -207,132 +235,193 @@ def _generate_response(prompt: str) -> str:
                     "please set it in the config.toml file."
                 )
 
-        if adapter == "qwen":
-            import dashscope
-            from dashscope.api_entities.dashscope_response import GenerationResponse
-
-            dashscope.api_key = api_key
-            response = dashscope.Generation.call(
-                model=model_name, messages=[{"role": "user", "content": prompt}]
-            )
-            if response:
-                if isinstance(response, GenerationResponse):
-                    status_code = response.status_code
-                    if status_code != 200:
-                        raise Exception(
-                            f'[{llm_provider}] returned an error response: "{response}"'
-                        )
-
-                    return _extract_qwen_generation_text(response)
-                else:
-                    raise Exception(
-                        f'[{llm_provider}] returned an invalid response: "{response}"'
-                    )
-            else:
-                raise Exception(f"[{llm_provider}] returned an empty response")
-
-        if adapter == "gemini":
-            from google import genai
-            from google.genai import types
-
-            http_options = types.HttpOptions(base_url=base_url) if base_url else None
-            generation_config = types.GenerateContentConfig(
-                temperature=0.5,
-                top_p=1,
-                top_k=1,
-                max_output_tokens=2048,
-                safety_settings=[
-                    types.SafetySetting(
-                        category="HARM_CATEGORY_HARASSMENT",
-                        threshold="BLOCK_ONLY_HIGH",
-                    ),
-                    types.SafetySetting(
-                        category="HARM_CATEGORY_HATE_SPEECH",
-                        threshold="BLOCK_ONLY_HIGH",
-                    ),
-                    types.SafetySetting(
-                        category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        threshold="BLOCK_ONLY_HIGH",
-                    ),
-                    types.SafetySetting(
-                        category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                        threshold="BLOCK_ONLY_HIGH",
-                    ),
-                ],
-            )
-
-            try:
-                # 新版 google-genai 通过统一 Client 暴露模型服务。上下文管理器
-                # 会在请求结束后关闭底层 HTTP 连接，避免频繁生成时积累连接资源。
-                with genai.Client(
-                    api_key=api_key,
-                    http_options=http_options,
-                ) as client:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=generation_config,
-                    )
-                generated_text = response.text
-            except (AttributeError, IndexError, ValueError) as e:
-                logger.warning(f"gemini returned invalid response content: {str(e)}")
-                raise ValueError(f"[{llm_provider}] returned invalid response content")
-
-            return _normalize_text_response(generated_text, llm_provider)
-
-        if adapter == "cloudflare_ai_gateway":
-            account_id = extra_values["account_id"]
-            gateway_id = extra_values["gateway_id"]
-            # Cloudflare 当前推荐的 AI Gateway REST API 兼容 OpenAI SDK。
-            # Account ID 用于构造统一端点，Gateway ID 通过请求头选择；这里
-            # 不再调用 Workers AI 的 /ai/run/{model} 专用接口。
-            client = OpenAI(
-                api_key=api_key,
-                base_url=(
-                    f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
-                ),
-                default_headers={"cf-aig-gateway-id": gateway_id},
-            )
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return _extract_chat_completion_text(response, llm_provider)
-
-        if adapter == "litellm":
-            import litellm
-
-            if not model_name:
-                raise ValueError(
-                    f"{llm_provider}: model_name is not set, please set it in the config.toml file."
+        def _call(active_model_name: str) -> str:
+            if adapter == "qwen":
+                import dashscope
+                from dashscope.api_entities.dashscope_response import (
+                    GenerationResponse,
                 )
 
-            response = litellm.completion(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                drop_params=True,
-            )
+                dashscope.api_key = api_key
+                response = dashscope.Generation.call(
+                    model=active_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if response:
+                    if isinstance(response, GenerationResponse):
+                        status_code = response.status_code
+                        if status_code != 200:
+                            raise Exception(
+                                f'[{llm_provider}] returned an error response: "{response}"'
+                            )
 
-            if not response:
-                raise ValueError(f"[{llm_provider}] returned empty response")
-            if not getattr(response, "choices", None):
-                raise ValueError(f"[{llm_provider}] returned empty response")
+                        return _extract_qwen_generation_text(response)
+                    else:
+                        raise Exception(
+                            f'[{llm_provider}] returned an invalid response: "{response}"'
+                        )
+                else:
+                    raise Exception(f"[{llm_provider}] returned an empty response")
 
-            return _extract_chat_completion_text(response, llm_provider)
+            if adapter == "gemini":
+                from google import genai
+                from google.genai import types
 
-        if adapter == "azure":
-            # Azure OpenAI SDK 使用 `azure_endpoint` 和 `api_version` 生成专用请求地址，
-            # 不能继续复用下面普通 OpenAI-compatible 的 `base_url` 初始化逻辑。
-            # 这里在 Azure 分支内完成请求并立即返回，避免客户端被后续 fallback
-            # 覆盖，导致用户配置的 Azure 凭证通过校验但实际请求没有被使用。
-            logger.info(f"requesting azure chat completion, model: {model_name}")
-            client = AzureOpenAI(
+                http_options = (
+                    types.HttpOptions(base_url=base_url) if base_url else None
+                )
+                generation_config = types.GenerateContentConfig(
+                    temperature=0.5,
+                    top_p=1,
+                    top_k=1,
+                    max_output_tokens=2048,
+                    safety_settings=[
+                        types.SafetySetting(
+                            category="HARM_CATEGORY_HARASSMENT",
+                            threshold="BLOCK_ONLY_HIGH",
+                        ),
+                        types.SafetySetting(
+                            category="HARM_CATEGORY_HATE_SPEECH",
+                            threshold="BLOCK_ONLY_HIGH",
+                        ),
+                        types.SafetySetting(
+                            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                            threshold="BLOCK_ONLY_HIGH",
+                        ),
+                        types.SafetySetting(
+                            category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                            threshold="BLOCK_ONLY_HIGH",
+                        ),
+                    ],
+                )
+
+                try:
+                    # 新版 google-genai 通过统一 Client 暴露模型服务。上下文管理器
+                    # 会在请求结束后关闭底层 HTTP 连接，避免频繁生成时积累连接资源。
+                    with genai.Client(
+                        api_key=api_key,
+                        http_options=http_options,
+                    ) as client:
+                        response = client.models.generate_content(
+                            model=active_model_name,
+                            contents=prompt,
+                            config=generation_config,
+                        )
+                    generated_text = response.text
+                except (AttributeError, IndexError, ValueError) as e:
+                    logger.warning(
+                        f"gemini returned invalid response content: {str(e)}"
+                    )
+                    raise ValueError(
+                        f"[{llm_provider}] returned invalid response content"
+                    )
+
+                return _normalize_text_response(generated_text, llm_provider)
+
+            if adapter == "cloudflare_ai_gateway":
+                account_id = extra_values["account_id"]
+                gateway_id = extra_values["gateway_id"]
+                # Cloudflare 当前推荐的 AI Gateway REST API 兼容 OpenAI SDK。
+                # Account ID 用于构造统一端点，Gateway ID 通过请求头选择；这里
+                # 不再调用 Workers AI 的 /ai/run/{model} 专用接口。
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url=(
+                        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+                    ),
+                    default_headers={"cf-aig-gateway-id": gateway_id},
+                )
+                response = client.chat.completions.create(
+                    model=active_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return _extract_chat_completion_text(response, llm_provider)
+
+            if adapter == "litellm":
+                import litellm
+
+                if not active_model_name:
+                    raise ValueError(
+                        f"{llm_provider}: model_name is not set, please set it in the config.toml file."
+                    )
+
+                response = litellm.completion(
+                    model=active_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    drop_params=True,
+                )
+
+                if not response:
+                    raise ValueError(f"[{llm_provider}] returned empty response")
+                if not getattr(response, "choices", None):
+                    raise ValueError(f"[{llm_provider}] returned empty response")
+
+                return _extract_chat_completion_text(response, llm_provider)
+
+            if adapter == "azure":
+                # Azure OpenAI SDK 使用 `azure_endpoint` 和 `api_version` 生成专用请求地址，
+                # 不能继续复用下面普通 OpenAI-compatible 的 `base_url` 初始化逻辑。
+                # 这里在 Azure 分支内完成请求并立即返回，避免客户端被后续 fallback
+                # 覆盖，导致用户配置的 Azure 凭证通过校验但实际请求没有被使用。
+                logger.info(
+                    f"requesting azure chat completion, model: {active_model_name}"
+                )
+                client = AzureOpenAI(
+                    api_key=api_key,
+                    api_version=api_version,
+                    azure_endpoint=base_url,
+                )
+                response = client.chat.completions.create(
+                    model=active_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if response:
+                    if isinstance(response, ChatCompletion):
+                        return _extract_chat_completion_text(response, llm_provider)
+                    else:
+                        raise Exception(
+                            f'[{llm_provider}] returned an invalid response: "{response}", please check your network '
+                            f"connection and try again."
+                        )
+                else:
+                    raise Exception(
+                        f"[{llm_provider}] returned an empty response, please check your network connection and try again."
+                    )
+
+            if adapter == "modelscope":
+                content = ""
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+                response = client.chat.completions.create(
+                    model=active_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    extra_body={"enable_thinking": False},
+                    stream=True,
+                )
+                if response:
+                    for chunk in response:
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        if delta and delta.content:
+                            content += delta.content
+
+                    if not content.strip():
+                        raise ValueError("Empty content in stream response")
+
+                    return _normalize_text_response(content, llm_provider)
+                else:
+                    raise Exception(f"[{llm_provider}] returned an empty response")
+
+            client = OpenAI(
                 api_key=api_key,
-                api_version=api_version,
-                azure_endpoint=base_url,
+                base_url=base_url,
             )
+
             response = client.chat.completions.create(
-                model=model_name, messages=[{"role": "user", "content": prompt}]
+                model=active_model_name, messages=[{"role": "user", "content": prompt}]
             )
             if response:
                 if isinstance(response, ChatCompletion):
@@ -347,53 +436,25 @@ def _generate_response(prompt: str) -> str:
                     f"[{llm_provider}] returned an empty response, please check your network connection and try again."
                 )
 
-        if adapter == "modelscope":
-            content = ""
-            client = OpenAI(
-                api_key=api_key,
-                base_url=base_url,
-            )
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                extra_body={"enable_thinking": False},
-                stream=True,
-            )
-            if response:
-                for chunk in response:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta and delta.content:
-                        content += delta.content
-
-                if not content.strip():
-                    raise ValueError("Empty content in stream response")
-
-                return _normalize_text_response(content, llm_provider)
-            else:
-                raise Exception(f"[{llm_provider}] returned an empty response")
-
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
-
-        response = client.chat.completions.create(
-            model=model_name, messages=[{"role": "user", "content": prompt}]
-        )
-        if response:
-            if isinstance(response, ChatCompletion):
-                return _extract_chat_completion_text(response, llm_provider)
-            else:
-                raise Exception(
-                    f'[{llm_provider}] returned an invalid response: "{response}", please check your network '
-                    f"connection and try again."
+        try:
+            return _call(model_name)
+        except Exception as e:
+            # 模型被厂商下线/改名时（如本次 Gemini 2.5 Flash 被强制迁移），报错
+            # 通常带有模型名和 "not found / no longer available" 之类措辞。命中
+            # 时自动改用 Registry 里维护的当前默认模型重试一次，这样厂商随时
+            # 下线模型也不需要每次都手动改 config.toml 才能恢复使用。
+            if (
+                provider.default_model
+                and model_name != provider.default_model
+                and _is_model_unavailable_error(e)
+            ):
+                logger.warning(
+                    f"{llm_provider} model '{model_name}' looks unavailable "
+                    f"({e}); retrying once with default model "
+                    f"'{provider.default_model}'"
                 )
-        else:
-            raise Exception(
-                f"[{llm_provider}] returned an empty response, please check your network connection and try again."
-            )
+                return _call(provider.default_model)
+            raise
 
     except Exception as e:
         return f"Error: {_sanitize_error_message(e)}"

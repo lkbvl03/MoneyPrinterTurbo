@@ -92,10 +92,18 @@ LLM_PROVIDER_REGISTRY = (
         "Google Gemini",
         adapter="gemini",
         api_key_url="https://aistudio.google.com/app/apikey",
-        default_model="gemini-3.1-pro-preview",
+        # Flash, không phải Pro: dong Pro yeu cau bat billing, tren du an
+        # Free tier hen muc la 0 (RESOURCE_EXHAUSTED ngay ca khi key hop le).
+        # Flash la dong duy nhat co han muc mien phi thuc su dung duoc.
+        default_model="gemini-3.6-flash",
         requires_base_url=False,
         show_base_url=False,
-        deprecated_models=("gemini-pro", "gemini-1.0-pro"),
+        deprecated_models=(
+            "gemini-pro",
+            "gemini-1.0-pro",
+            "gemini-2.5-flash",
+            "gemini-3.1-pro-preview",
+        ),
     ),
     LLMProviderSpec(
         "deepseek",
