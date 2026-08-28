@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import List
 
 from loguru import logger
@@ -163,6 +163,40 @@ def _is_model_unavailable_error(error: Exception) -> bool:
     if "model" not in message:
         return False
     return any(marker in message for marker in _MODEL_UNAVAILABLE_MARKERS)
+
+
+_RATE_LIMIT_MARKERS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "resource_exhausted",
+    "quota exceeded",
+    "too many requests",
+)
+_RETRY_DELAY_RE = re.compile(r"retry in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+_MAX_RATE_LIMIT_RETRIES = 2
+_RATE_LIMIT_BACKOFF_SECONDS = (3.0, 8.0)
+_RATE_LIMIT_MAX_DELAY_SECONDS = 20.0
+
+
+def _is_rate_limited_error(error: Exception) -> bool:
+    """粗略判断报错是否是限流/配额耗尽（可通过等待后重试恢复），而不是需要
+    用户介入才能修复的错误（如密钥无效、参数错误）。"""
+    message = str(error).lower()
+    return any(marker in message for marker in _RATE_LIMIT_MARKERS)
+
+
+def _extract_retry_delay(error: Exception, default_seconds: float) -> float:
+    """优先使用厂商在报错里给出的建议等待时间（如 Gemini 的
+    "Please retry in 27.03s"），没有时才用固定退避时间；同时设置上限，
+    避免一次测试连接卡住太久。"""
+    match = _RETRY_DELAY_RE.search(str(error))
+    if match:
+        try:
+            return min(float(match.group(1)), _RATE_LIMIT_MAX_DELAY_SECONDS)
+        except ValueError:
+            pass
+    return min(default_seconds, _RATE_LIMIT_MAX_DELAY_SECONDS)
 
 
 def _generate_response(prompt: str) -> str:
@@ -436,8 +470,38 @@ def _generate_response(prompt: str) -> str:
                     f"[{llm_provider}] returned an empty response, please check your network connection and try again."
                 )
 
+        def _call_with_rate_limit_retry(active_model_name: str) -> str:
+            # 免费额度、突发流量都可能触发限流，等一下通常就能恢复——比直接
+            # 把错误抛给用户（往往意味着整个生成任务失败重来）体验好得多。
+            # 只在明确识别为限流错误时才等待重试，其它错误（密钥无效、参数
+            # 错误等）第一次失败就直接抛出，避免无意义地拖长等待。
+            last_error: Exception | None = None
+            try:
+                return _call(active_model_name)
+            except Exception as e:
+                last_error = e
+
+            for attempt in range(_MAX_RATE_LIMIT_RETRIES):
+                if not _is_rate_limited_error(last_error):
+                    raise last_error
+                delay = _extract_retry_delay(
+                    last_error, _RATE_LIMIT_BACKOFF_SECONDS[attempt]
+                )
+                logger.warning(
+                    f"{llm_provider} rate limited ({last_error}); "
+                    f"retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})"
+                )
+                sleep(delay)
+                try:
+                    return _call(active_model_name)
+                except Exception as e:
+                    last_error = e
+
+            raise last_error
+
         try:
-            return _call(model_name)
+            return _call_with_rate_limit_retry(model_name)
         except Exception as e:
             # 模型被厂商下线/改名时（如本次 Gemini 2.5 Flash 被强制迁移），报错
             # 通常带有模型名和 "not found / no longer available" 之类措辞。命中
@@ -453,7 +517,7 @@ def _generate_response(prompt: str) -> str:
                     f"({e}); retrying once with default model "
                     f"'{provider.default_model}'"
                 )
-                return _call(provider.default_model)
+                return _call_with_rate_limit_retry(provider.default_model)
             raise
 
     except Exception as e:

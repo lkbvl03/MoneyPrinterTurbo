@@ -41,7 +41,15 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
-from app.services import cache_manager, llm, media_library, video, voice, webui_task
+from app.services import (
+    cache_manager,
+    diagnostics,
+    llm,
+    media_library,
+    video,
+    voice,
+    webui_task,
+)
 from app.services.utils.card_markers import extract_card_markers
 from app.services.utils.card_text import CARD_EFFECTS, CARD_STYLES
 from app.services.utils.card_text._sounds import CARD_SOUNDS
@@ -1883,6 +1891,65 @@ def _render_cache_management_settings(panel):
             st.rerun(scope="fragment")
 
 
+_SYSTEM_CHECK_STATUS_ICON = {
+    diagnostics.STATUS_OK: "✅",
+    diagnostics.STATUS_WARN: "⚠️",
+    diagnostics.STATUS_ERROR: "❌",
+    diagnostics.STATUS_SKIP: "⏭️",
+}
+_SYSTEM_CHECK_STATUS_LABEL_KEY = {
+    diagnostics.STATUS_OK: "System Check Status OK",
+    diagnostics.STATUS_WARN: "System Check Status Warn",
+    diagnostics.STATUS_ERROR: "System Check Status Error",
+    diagnostics.STATUS_SKIP: "System Check Status Skip",
+}
+
+
+def _render_system_check_settings(panel):
+    """渲染一键环境自检：Python/FFmpeg/LLM 连接/TTS 模型/GitHub 更新等。
+
+    结果缓存在 session_state，只有点击按钮才会真正执行（尤其是 LLM 连接测试
+    和 GitHub fetch 涉及网络请求），避免每次打开设置弹窗都触发网络调用。
+    """
+    with panel:
+        st.caption(tr("System Check Description"))
+
+        if st.button(
+            tr("Run System Check"),
+            key="run_system_check_button",
+            type="primary",
+            use_container_width=True,
+            icon=":material/health_and_safety:",
+        ):
+            with st.spinner(tr("Running System Check")):
+                st.session_state["system_check_results"] = (
+                    diagnostics.run_all_checks()
+                )
+
+        results = st.session_state.get("system_check_results")
+        if not results:
+            st.info(tr("System Check Not Run Yet"))
+            return
+
+        error_count = sum(1 for r in results if r.status == diagnostics.STATUS_ERROR)
+        warn_count = sum(1 for r in results if r.status == diagnostics.STATUS_WARN)
+        if error_count:
+            st.error(tr("System Check Summary Error").format(count=error_count))
+        elif warn_count:
+            st.warning(tr("System Check Summary Warn").format(count=warn_count))
+        else:
+            st.success(tr("System Check Summary OK"))
+
+        for result in results:
+            icon = _SYSTEM_CHECK_STATUS_ICON.get(result.status, "•")
+            status_text = tr(
+                _SYSTEM_CHECK_STATUS_LABEL_KEY.get(result.status, "")
+            )
+            st.markdown(f"{icon} **{result.label}** — {status_text}")
+            if result.detail:
+                st.caption(result.detail)
+
+
 # -----------------------------------------------------------------------------
 # 设置与提示词弹窗
 # -----------------------------------------------------------------------------
@@ -1907,14 +1974,18 @@ def _render_settings_dialog():
             right_config_panel,
             cache_config_panel,
             left_config_panel,
+            system_check_panel,
         ) = st.tabs(
             [
                 tr("LLM Settings Tab"),
                 tr("Material API Tab"),
                 tr("Cache Management Tab"),
                 tr("Interface Settings Tab"),
+                tr("System Check Tab"),
             ]
         )
+
+        _render_system_check_settings(system_check_panel)
 
         # 左侧面板 - 日志设置
         with left_config_panel:
