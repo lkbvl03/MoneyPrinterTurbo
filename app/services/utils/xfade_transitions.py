@@ -79,3 +79,32 @@ def build_xfade_filter_complex(
         previous_label = output_label
 
     return ";".join(filters), "[outv]"
+
+
+def build_xfade_audio_filter_complex(
+    transition_durations: List[float],
+) -> Tuple[str, str]:
+    """构造与 build_xfade_filter_complex 对应的音频交叉淡化链。
+
+    ffmpeg 的 acrossfade 语义上和 xfade 一致（在两段衔接处按给定时长互相
+    淡入淡出），只是不需要单独的 offset 参数——它总是用前一段的结尾和
+    后一段的开头做交叉。只要用同一组 transition_durations，就能让声音的
+    过渡节奏和画面转场精确对上。
+    """
+    if not transition_durations:
+        raise ValueError(
+            "build_xfade_audio_filter_complex requires at least 1 transition"
+        )
+
+    filters = []
+    previous_label = "[0:a]"
+    last_index = len(transition_durations) - 1
+    for index, duration in enumerate(transition_durations):
+        next_input = f"[{index + 1}:a]"
+        output_label = "[outa]" if index == last_index else f"[a{index + 1}]"
+        filters.append(
+            f"{previous_label}{next_input}acrossfade=d={duration:.3f}{output_label}"
+        )
+        previous_label = output_label
+
+    return ";".join(filters), "[outa]"

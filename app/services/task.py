@@ -800,6 +800,8 @@ def generate_final_videos(
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
             clip_speed=params.video_clip_speed,
+            keep_original_audio=bool(params.original_audio_enabled),
+            original_audio_volume=float(params.original_audio_volume or 1.0),
         )
 
         _progress += 50 / params.video_count / 2

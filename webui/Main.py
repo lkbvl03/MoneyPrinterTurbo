@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from loguru import logger
 from streamlit_tour import Tour
 
@@ -44,6 +45,7 @@ from app.services import bgm as bgm_service
 from app.services import (
     cache_manager,
     diagnostics,
+    git_sync,
     llm,
     media_library,
     video,
@@ -89,6 +91,53 @@ st.set_page_config(
 style_file = Path(__file__).with_name("styles.css")
 streamlit_style = f"<style>{style_file.read_text(encoding='utf-8')}</style>"
 st.markdown(streamlit_style, unsafe_allow_html=True)
+
+STREAMLIT_THEME_MODES = ("System", "Light", "Dark")
+
+
+def _sync_streamlit_theme():
+    """把"界面设置"里选的主题同步成 Streamlit 自带的真实主题状态。
+
+    Streamlit 自带完整的 Light/Dark/System 主题，每个内置组件（含下拉框、
+    弹层等 portal 到 body 的部分）都会正确适配，比另外手写一份深色样式表
+    覆盖更可靠。唯一障碍是主题入口（Main Menu）被本项目自己的 CSS 隐藏了；
+    styles.css 里已经改成把 header 收缩到 0 高度而不是 display:none，让
+    菜单按钮不占地方、也不可见，但仍能用脚本"点开"。这里用一个隐藏的
+    components.html iframe 跨帧访问父文档，模拟用户手动点菜单选主题，
+    直接复用 Streamlit 自己的切换逻辑，而不是自己维护一套深色 CSS。
+    """
+    desired = config.ui.get("theme_mode", "System")
+    if desired not in STREAMLIT_THEME_MODES:
+        desired = "System"
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var desired = {desired!r};
+            var doc = window.parent.document;
+            var stored = null;
+            try {{
+                var raw = window.parent.localStorage.getItem('stActiveTheme-/-v2');
+                stored = raw ? JSON.parse(raw) : null;
+            }} catch (e) {{}}
+            if (stored === desired) return;
+            var btn = doc.querySelector('[data-testid="stMainMenuButton"]');
+            if (!btn) return;
+            btn.click();
+            setTimeout(function() {{
+                var item = doc.querySelector(
+                    '[data-testid="stMainMenuItem-theme-' + desired + '"]'
+                );
+                if (item) {{ item.click(); }}
+            }}, 350);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+_sync_streamlit_theme()
 # 定义资源目录
 font_dir = os.path.join(root_dir, "resource", "fonts")
 song_dir = os.path.join(root_dir, "resource", "songs")
@@ -1132,6 +1181,25 @@ def _render_pending_version_check():
     _render_brand()
 
 
+@st.fragment(run_every="60s")
+def _render_git_sync_banner():
+    """检查/自动拉取本机 fork 仓库的最新代码（跟上游正式版本无关）。
+
+    后台检查器每 30 分钟才真正跑一次 git；这里的 60 秒只是低成本地读取
+    缓存快照。绝大多数时候（已是最新、没配置 git、还没查完）什么都不显示，
+    只有确实拉取了新代码或拉取失败时才提示，避免每次打开都看到一行噪音。
+    """
+    snapshot = git_sync.poll_git_sync()
+    if not snapshot.complete or snapshot.state in ("up_to_date", "unavailable"):
+        return
+    if snapshot.state == "updated":
+        st.success(
+            tr("Git Auto Sync Updated").format(count=snapshot.pulled_commits)
+        )
+    elif snapshot.state == "update_failed":
+        st.warning(tr("Git Auto Sync Failed"))
+
+
 def _render_top_bar():
     """渲染品牌、任务管理、设置和语言切换组成的页面顶部栏。"""
     # 顶部栏分为品牌区和操作区两个独立区域。窄屏下由 Streamlit
@@ -1987,8 +2055,22 @@ def _render_settings_dialog():
 
         _render_system_check_settings(system_check_panel)
 
-        # 左侧面板 - 日志设置
+        # 左侧面板 - 界面主题与日志设置
         with left_config_panel:
+            theme_labels = {
+                "System": tr("Interface Theme System"),
+                "Light": tr("Interface Theme Light"),
+                "Dark": tr("Interface Theme Dark"),
+            }
+            theme_mode = stable_selectbox(
+                tr("Interface Theme"),
+                options=list(STREAMLIT_THEME_MODES),
+                default_value=config.ui.get("theme_mode", "System"),
+                key="theme_mode_select",
+                format_func=lambda value: theme_labels[value],
+            )
+            config.ui["theme_mode"] = theme_mode
+
             hide_log = st.checkbox(
                 tr("Hide Log"),
                 value=config.ui.get("hide_log", False),
@@ -2506,6 +2588,30 @@ def _render_media_library_panel(video_aspect):
         st.rerun()
 
 
+def _render_local_material_previews(uploaded_files):
+    """本地上传素材的逐个预览：点开才加载播放器/图片，避免一次性全部渲染。
+
+    `st.file_uploader`本身只显示文件名和大小，看不到内容；用户上传多个片段
+    后经常需要挨个确认是不是选错了文件、时长对不对，这里用可折叠列表满足
+    "点进去看" 的需求，默认全部收起，不影响页面其余部分的滚动体验。
+    """
+    if not uploaded_files:
+        return
+
+    with st.expander(
+        tr("Preview Uploaded Materials").format(count=len(uploaded_files)),
+        expanded=False,
+    ):
+        for uploaded_file in uploaded_files:
+            extension = utils.parse_extension(uploaded_file.name)
+            file_size_mb = uploaded_file.size / (1024 * 1024)
+            with st.expander(f"{uploaded_file.name} ({file_size_mb:.1f} MB)"):
+                if extension in const.FILE_TYPE_IMAGES:
+                    st.image(uploaded_file)
+                else:
+                    st.video(uploaded_file)
+
+
 def _render_video_settings(panel, params):
     """渲染视频设置并返回本次选择的本地素材。"""
     uploaded_files = []
@@ -2550,6 +2656,25 @@ def _render_video_settings(panel, params):
                     accept_multiple_files=True,
                     key="local_video_materials_uploader",
                 )
+
+                _render_local_material_previews(uploaded_files)
+
+                params.original_audio_enabled = st.checkbox(
+                    tr("Keep Original Audio"),
+                    value=config.app.get("original_audio_enabled", False),
+                    help=tr("Keep Original Audio Help"),
+                    key="original_audio_enabled_checkbox",
+                )
+                config.app["original_audio_enabled"] = params.original_audio_enabled
+                params.original_audio_volume = stable_selectbox(
+                    tr("Original Audio Volume"),
+                    options=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0],
+                    default_value=1.0,
+                    key="original_audio_volume_select",
+                    format_func=lambda value: f"{int(value * 100)}%",
+                    disabled=not params.original_audio_enabled,
+                )
+                config.app["original_audio_volume"] = params.original_audio_volume
 
             # 文案顺序匹配会从关键词生成到最终合成全程保持叙事顺序，因此开启时
             # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
@@ -4425,6 +4550,7 @@ def _render_generation_controls(
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
+    _render_git_sync_banner()
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()

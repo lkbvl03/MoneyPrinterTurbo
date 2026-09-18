@@ -342,6 +342,7 @@ def concat_video_clips_with_ffmpeg(
     threads: int,
     output_dir: str,
     max_duration: float | None = None,
+    has_audio: bool = False,
 ):
     concat_list_file = os.path.join(output_dir, "ffmpeg-concat-list.txt")
     with open(concat_list_file, "w", encoding="utf-8") as fp:
@@ -365,6 +366,10 @@ def concat_video_clips_with_ffmpeg(
             "-pix_fmt",
             "yuv420p",
         ]
+        # 显式声明音轨去留，不依赖 FFmpeg 在缺省 -map 时的自动流选择：
+        # 输入片段是否带音轨完全由 combine_videos() 是否保留素材原声决定，
+        # 这里跟这个开关保持一致，两条分支互不影响。
+        command += ["-c:a", "aac"] if has_audio else ["-an"]
         if max_duration is not None and max_duration > 0:
             command.extend(["-t", f"{max_duration:.3f}"])
         command.append(output_file)
@@ -409,6 +414,7 @@ def concat_video_clips_with_xfade(
     transition_duration: float = 1.0,
     max_duration: float | None = None,
     random_choice=random.choice,
+    has_audio: bool = False,
 ) -> None:
     if len(clip_files) < 2:
         # Nothing to transition between -- fall back to plain concat.
@@ -418,6 +424,7 @@ def concat_video_clips_with_xfade(
             threads=threads,
             output_dir=output_dir,
             max_duration=max_duration,
+            has_audio=has_audio,
         )
         return
 
@@ -431,16 +438,24 @@ def concat_video_clips_with_xfade(
     filter_complex, output_label = xfade_transitions.build_xfade_filter_complex(
         clip_durations, transition_names, transition_durations
     )
+    audio_output_label = None
+    if has_audio:
+        # acrossfade 和 xfade 逻辑对应：用同一组 transition_durations 做交叉
+        # 混音时长，保证声音的淡入淡出节奏和画面转场完全同步，不会出现
+        # 画面已经切到下一段、声音还在播上一段的错位。
+        audio_filter_complex, audio_output_label = (
+            xfade_transitions.build_xfade_audio_filter_complex(transition_durations)
+        )
+        filter_complex = f"{filter_complex};{audio_filter_complex}"
 
     def build_command(codec: str) -> list[str]:
         command = [utils.get_ffmpeg_binary(), "-y"]
         for clip_file in clip_files:
             command += ["-i", clip_file]
+        command += ["-filter_complex", filter_complex, "-map", output_label]
+        if audio_output_label:
+            command += ["-map", audio_output_label, "-c:a", "aac"]
         command += [
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            output_label,
             "-c:v",
             codec,
             "-threads",
@@ -527,6 +542,19 @@ def _open_video_clip_quietly(video_path: str, audio: bool = False) -> VideoFileC
         )
 
     return clip
+
+
+def _silent_audio_clip(duration: float, fps: int = 44100) -> AudioArrayClip:
+    """生成静音音轨，时长与给定视频片段一致。
+
+    保留素材原声时，同一批临时片段里可能有的有原声、有的本来就没有音轨
+    （比如混合上传了带声音的实拍片段和无声的空镜）。FFmpeg 的 concat
+    demuxer 和 xfade filter_complex 都要求所有输入片段的音轨结构一致，
+    用静音占位补齐，让后续拼接始终能统一处理音频，而不必为每种组合单独
+    分支。
+    """
+    sample_count = max(1, int(round(duration * fps)))
+    return AudioArrayClip(np.zeros((sample_count, 1)), fps=fps)
 
 
 def close_clip(clip):
@@ -626,6 +654,8 @@ def combine_videos(
     max_clip_duration: int = 7,
     threads: int = 2,
     clip_speed: float = 1.0,
+    keep_original_audio: bool = False,
+    original_audio_volume: float = 1.0,
 ) -> str:
     audio_clip = AudioFileClip(audio_file)
     try:
@@ -713,15 +743,26 @@ def combine_videos(
         )
         
         try:
-            clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
-                subclipped_item.start_time, subclipped_item.end_time
-            )
+            clip = _open_video_clip_quietly(
+                subclipped_item.file_path, audio=keep_original_audio
+            ).subclipped(subclipped_item.start_time, subclipped_item.end_time)
             # 播放速度属于素材本身属性，应在转场前应用。这样 Fade/Slide 等一秒转场
             # 不会跟随素材速度变成 0.5 秒或 2 秒；后续最大时长裁剪继续作为
             # 浮点误差或异常素材时长的安全兜底，保证最终片段不突破配置上限。
             if normalized_clip_speed != 1.0:
                 clip = clip.with_speed_scaled(normalized_clip_speed)
             clip_duration = clip.duration
+            # 先把这一段原声单独存一份引用：下面的画面缩放/转场/特效大多会用
+            # CompositeVideoClip 重新包一层，MoviePy 不会自动把子片段的音轨带
+            # 过去，直接跟着 clip 走音频会在中途悄悄消失。存成独立变量，写文件
+            # 前再显式挂回最终的 clip 上，不受中间处理步骤影响。
+            original_audio = None
+            if keep_original_audio:
+                original_audio = (
+                    clip.audio.with_effects([afx.MultiplyVolume(original_audio_volume)])
+                    if clip.audio is not None
+                    else _silent_audio_clip(clip_duration)
+                )
             # Not all videos are same size, so we need to resize them
             clip_w, clip_h = clip.size
             if clip_w != video_width or clip_h != video_height:
@@ -785,7 +826,16 @@ def combine_videos(
 
             if clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
-                
+
+            if original_audio is not None:
+                # 用 min() 防御：正常情况下两者时长一致，只是保留一层保险，
+                # 避免上面任何一步意外改变了 clip.duration 后这里越界报错。
+                clip = clip.with_audio(
+                    original_audio.subclipped(
+                        0, min(original_audio.duration, clip.duration)
+                    )
+                )
+
             # wirte clip to temp file
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
             _write_videofile_with_codec_fallback(
@@ -882,6 +932,7 @@ def combine_videos(
             output_dir=output_dir,
             transition_style=video_transition_style,
             max_duration=audio_duration,
+            has_audio=keep_original_audio,
         )
     else:
         concat_video_clips_with_ffmpeg(
@@ -890,6 +941,7 @@ def combine_videos(
             threads=threads,
             output_dir=output_dir,
             max_duration=audio_duration,
+            has_audio=keep_original_audio,
         )
 
     # clean temp files
@@ -1393,14 +1445,21 @@ def generate_video(
     # ExitStack 显式持有所有原始文件 reader，确保成功、字幕异常、混音失败和
     # 视频写入失败等路径都能释放 FFmpeg 子进程，尤其避免 Windows 文件被占用。
     with ExitStack() as clip_stack:
+        # combine_videos() 只在保留素材原声时才会往中间成片里写音轨；这里始终
+        # 用 audio=True 打开，没有音轨的普通情况下 source_video_clip.audio
+        # 会是 None，和以前完全一样，不需要额外开关判断。
         source_video_clip = clip_stack.enter_context(
-            _open_video_clip_quietly(video_path)
+            _open_video_clip_quietly(video_path, audio=True)
         )
         voice_source_clip = clip_stack.enter_context(AudioFileClip(audio_path))
         video_clip = source_video_clip
         audio_clip = voice_source_clip.with_effects(
             [afx.MultiplyVolume(params.voice_volume)]
         )
+        if source_video_clip.audio is not None:
+            # 音量已经在 combine_videos() 按 original_audio_volume 处理过，
+            # 这里直接混入即可，避免重复放大/缩小。
+            audio_clip = CompositeAudioClip([audio_clip, source_video_clip.audio])
 
         def make_textclip(text):
             return TextClip(

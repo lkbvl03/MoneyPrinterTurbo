@@ -1,10 +1,21 @@
-header[data-testid="stHeader"],
 div[data-testid="stToolbar"],
 div[data-testid="stDecoration"],
 div[data-testid="stStatusWidget"],
 div[data-testid="stSkillsNudgeAnchor"],
 div[data-testid="stSkillsNudge"] {
     display: none !important;
+}
+
+/* Header thu gọn về cao 0 thay vì display:none: nút Main Menu (chứa bộ
+   chọn giao diện Sáng/Tối/Theo hệ thống có sẵn của Streamlit) vẫn tồn tại
+   trong DOM và bấm được bằng script, chỉ là không chiếm chỗ hay hiển thị
+   ra mắt người dùng. display:none sẽ khiến nút không mở được menu nữa. */
+header[data-testid="stHeader"] {
+    height: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: hidden !important;
 }
 
 div[data-testid="stMainBlockContainer"] {

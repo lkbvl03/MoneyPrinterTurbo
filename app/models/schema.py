@@ -122,6 +122,12 @@ class VideoParams(BaseModel):
     video_music_prompt: str = Field(default="", max_length=2000)
     sonilo_bgm_prompt: str = Field(default="", max_length=2000)
 
+    # 仅对本地上传素材（video_source="local"）有意义：素材本身自带的环境音/
+    # 背景声，默认关闭以保持历史行为（成片只有旁白+可选 BGM）。开启后与旁白、
+    # BGM 一起混音，而不是像 voice/bgm 那样各自独立控制音量来源。
+    original_audio_enabled: Optional[bool] = False
+    original_audio_volume: Optional[float] = Field(default=1.0, ge=0.0, le=5.0)
+
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")  # top, bottom, center, custom
     custom_position: float = config.ui.get("custom_position", 70.0)
